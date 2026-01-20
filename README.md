@@ -21,12 +21,144 @@ When an auditor asks "How did this payment logic change get approved?", GitHub g
 ## How It Works
 
 ```
-PR Opened -> CodeGuard analyzes diff -> Risk tier assigned (L0-L4)
-                                              |
-                   L0-L2: Auto-approved       |       L3-L4: Human review required
-                                              v
-                            Evidence bundle generated (hash-chained, verifiable)
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         GUARDSPINE CODEGUARD FLOW                           │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+  ┌──────────┐
+  │ PR Open  │
+  │ /Update  │
+  └────┬─────┘
+       │
+       ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│                           1. DIFF ANALYSIS                                │
+│  ┌─────────────────────────────────────────────────────────────────────┐ │
+│  │  • Parse unified diff (unidiff)                                     │ │
+│  │  • Extract file changes, hunks, line-level modifications            │ │
+│  │  • Detect 8 sensitive zones:                                        │ │
+│  │    [auth] [payment] [crypto] [database] [security] [pii] [config]   │ │
+│  │    [infra]                                                          │ │
+│  │  • Generate SHA-256 diff hash for integrity                         │ │
+│  └─────────────────────────────────────────────────────────────────────┘ │
+└──────────────────────────────────────────────────────────────────────────┘
+       │
+       ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│                    2. MULTI-MODEL AI ANALYSIS (Optional)                  │
+│  ┌─────────────────────────────────────────────────────────────────────┐ │
+│  │  Priority Order (first available wins):                             │ │
+│  │                                                                     │ │
+│  │   ┌─────────────┐   ┌─────────────┐   ┌─────────────┐   ┌────────┐ │ │
+│  │   │   Ollama    │ → │ OpenRouter  │ → │  Anthropic  │ → │ OpenAI │ │ │
+│  │   │  (Local)    │   │ (100+ LLMs) │   │  (Claude)   │   │ (GPT)  │ │ │
+│  │   │ Air-gapped  │   │ Claude/GPT/ │   │   Direct    │   │ Direct │ │ │
+│  │   │   Llama3    │   │ Gemini/etc  │   │    API      │   │  API   │ │ │
+│  │   └─────────────┘   └─────────────┘   └─────────────┘   └────────┘ │ │
+│  │                                                                     │ │
+│  │  Each model provides:                                               │ │
+│  │   • One-sentence change summary                                     │ │
+│  │   • Intent classification (feature/bugfix/refactor/config/security) │ │
+│  │   • Security/compliance concerns list                               │ │
+│  └─────────────────────────────────────────────────────────────────────┘ │
+└──────────────────────────────────────────────────────────────────────────┘
+       │
+       ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│                        3. RISK CLASSIFICATION                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐ │
+│  │  Three scoring dimensions → Final risk tier:                        │ │
+│  │                                                                     │ │
+│  │   File Patterns ──────┐                                             │ │
+│  │   (auth/payment/pii)  │                                             │ │
+│  │                       ├──→ max(scores) ──→ ┌────────────────────┐   │ │
+│  │   Sensitive Zones ────┤                    │   L0 │ Trivial     │   │ │
+│  │   (8 zone types)      │                    │   L1 │ Low         │   │ │
+│  │                       │                    │   L2 │ Medium      │   │ │
+│  │   Change Size ────────┘                    │   L3 │ High    ⚠️  │   │ │
+│  │   (lines added/removed)                    │   L4 │ Critical ⛔ │   │ │
+│  │                                            └────────────────────┘   │ │
+│  │                                                                     │ │
+│  │  Rubric boost: SOC2/HIPAA/PCI-DSS rules can escalate tier          │ │
+│  └─────────────────────────────────────────────────────────────────────┘ │
+└──────────────────────────────────────────────────────────────────────────┘
+       │
+       ├──────────────────────────────────────┐
+       ▼                                      ▼
+┌────────────────────┐              ┌────────────────────┐
+│ L0-L2: Auto-pass   │              │ L3-L4: Block merge │
+│ ✓ PR check passes  │              │ ⚠ Requires review  │
+│ ✓ Comment posted   │              │ ⛔ Human approval  │
+└────────────────────┘              └────────────────────┘
+       │                                      │
+       └──────────────────┬───────────────────┘
+                          ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│                      4. EVIDENCE BUNDLE GENERATION                        │
+│  ┌─────────────────────────────────────────────────────────────────────┐ │
+│  │  Hash-chained event sequence (tamper-evident):                      │ │
+│  │                                                                     │ │
+│  │   Event 1           Event 2            Event 3          Event 4     │ │
+│  │  ┌─────────┐       ┌─────────┐        ┌─────────┐      ┌─────────┐  │ │
+│  │  │   PR    │──H1──▶│Analysis │──H2───▶│  Risk   │─H3──▶│Approval │  │ │
+│  │  │Submitted│       │Complete │        │Classify │      │(if L3+) │  │ │
+│  │  └─────────┘       └─────────┘        └─────────┘      └─────────┘  │ │
+│  │       │                                                     │       │ │
+│  │       └───────────────── Final Hash ────────────────────────┘       │ │
+│  │                                                                     │ │
+│  │  Bundle includes: diff snapshot, risk drivers, findings, rationale │ │
+│  │  Supports: Ed25519, RSA, ECDSA, or HMAC-SHA256 signatures          │ │
+│  └─────────────────────────────────────────────────────────────────────┘ │
+└──────────────────────────────────────────────────────────────────────────┘
+       │
+       ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│                           5. OUTPUT ARTIFACTS                             │
+│  ┌────────────────┐  ┌────────────────┐  ┌────────────────────────────┐  │
+│  │  Diff Postcard │  │ Evidence Bundle│  │     SARIF Export           │  │
+│  │  (PR Comment)  │  │  (JSON file)   │  │  (GitHub Security Tab)     │  │
+│  │                │  │                │  │                            │  │
+│  │ • Risk tier    │  │ • Hash chain   │  │ • Findings as alerts       │  │
+│  │ • Top drivers  │  │ • Event log    │  │ • File locations           │  │
+│  │ • Findings     │  │ • Signatures   │  │ • Severity mapping         │  │
+│  │ • AI summary   │  │ • Snapshot     │  │                            │  │
+│  └────────────────┘  └────────────────┘  └────────────────────────────┘  │
+└──────────────────────────────────────────────────────────────────────────┘
 ```
+
+### Multi-Model AI Architecture
+
+CodeGuard supports **four AI backends** with automatic fallback. This lets you choose based on your security posture:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                     AI PROVIDER SELECTION LOGIC                          │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│   if ollama_host configured:        ← HIGHEST PRIORITY (air-gapped)     │
+│       use Ollama (local inference)                                       │
+│                                                                          │
+│   elif openrouter_api_key configured:                                    │
+│       use OpenRouter (100+ models via single API)                        │
+│                                                                          │
+│   elif anthropic_api_key configured:                                     │
+│       use Anthropic Claude directly                                      │
+│                                                                          │
+│   elif openai_api_key configured:   ← LOWEST PRIORITY                   │
+│       use OpenAI GPT directly                                            │
+│                                                                          │
+│   else:                                                                  │
+│       skip AI analysis (rule-based only)                                 │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+| Provider | Data Residency | Models | Best For |
+|----------|----------------|--------|----------|
+| **Ollama** | Your infrastructure | Llama, Mistral, CodeLlama | Air-gapped/regulated environments |
+| **OpenRouter** | OpenRouter servers | 100+ (Claude, GPT, Gemini, Llama) | Flexibility, model switching |
+| **Anthropic** | Anthropic servers | Claude family | Direct Claude access |
+| **OpenAI** | OpenAI servers | GPT family | Existing OpenAI users |
 
 ### Risk Tiers
 
