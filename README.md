@@ -45,21 +45,32 @@ When an auditor asks "How did this payment logic change get approved?", GitHub g
        │
        ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
-│                    2. MULTI-MODEL AI ANALYSIS (Optional)                  │
+│                    2. TIER-BASED MULTI-MODEL AI REVIEW                   │
 │  ┌─────────────────────────────────────────────────────────────────────┐ │
-│  │  Priority Order (first available wins):                             │ │
+│  │  Models scale with risk tier (not fallback - actual multi-review):  │ │
 │  │                                                                     │ │
-│  │   ┌─────────────┐   ┌─────────────┐   ┌─────────────┐   ┌────────┐ │ │
-│  │   │   Ollama    │ → │ OpenRouter  │ → │  Anthropic  │ → │ OpenAI │ │ │
-│  │   │  (Local)    │   │ (100+ LLMs) │   │  (Claude)   │   │ (GPT)  │ │ │
-│  │   │ Air-gapped  │   │ Claude/GPT/ │   │   Direct    │   │ Direct │ │ │
-│  │   │   Llama3    │   │ Gemini/etc  │   │    API      │   │  API   │ │ │
-│  │   └─────────────┘   └─────────────┘   └─────────────┘   └────────┘ │ │
+│  │   L0 (Trivial)  → 0 models  (rules-based only, no AI)              │ │
+│  │   L1 (Low)      → 1 model   (single model review)                  │ │
+│  │   L2 (Medium)   → 2 models  + rubric scoring                       │ │
+│  │   L3 (High)     → 3 models  + rubric scoring                       │ │
+│  │   L4 (Critical) → 3 models  + rubric scoring + human approval      │ │
 │  │                                                                     │ │
-│  │  Each model provides:                                               │ │
-│  │   • One-sentence change summary                                     │ │
-│  │   • Intent classification (feature/bugfix/refactor/config/security) │ │
-│  │   • Security/compliance concerns list                               │ │
+│  │  ┌─────────┐  ┌─────────┐  ┌─────────┐                             │ │
+│  │  │ Model 1 │  │ Model 2 │  │ Model 3 │  ← Run in PARALLEL          │ │
+│  │  │ Claude  │  │  GPT    │  │ Gemini  │                             │ │
+│  │  └────┬────┘  └────┬────┘  └────┬────┘                             │ │
+│  │       │            │            │                                   │ │
+│  │       └────────────┼────────────┘                                   │ │
+│  │                    ▼                                                │ │
+│  │            ┌──────────────┐                                         │ │
+│  │            │  CONSENSUS   │  Majority vote + rubric aggregation    │ │
+│  │            │  CALCULATOR  │  Agreement score + dissent tracking    │ │
+│  │            └──────────────┘                                         │ │
+│  │                                                                     │ │
+│  │  Flexible model selection:                                          │ │
+│  │   • All 3 from Ollama (air-gapped)                                 │ │
+│  │   • All 3 from OpenRouter (100+ models)                            │ │
+│  │   • Mix of direct APIs (Claude + GPT + Gemini)                     │ │
 │  └─────────────────────────────────────────────────────────────────────┘ │
 └──────────────────────────────────────────────────────────────────────────┘
        │
@@ -126,49 +137,76 @@ When an auditor asks "How did this payment logic change get approved?", GitHub g
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Multi-Model AI Architecture
+### Tier-Based Multi-Model Review
 
-CodeGuard supports **four AI backends** with automatic fallback. This lets you choose based on your security posture:
+CodeGuard uses **escalating AI review** - more models review higher-risk changes:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                     AI PROVIDER SELECTION LOGIC                          │
+│                     TIER-BASED MODEL ESCALATION                          │
 ├─────────────────────────────────────────────────────────────────────────┤
 │                                                                          │
-│   if ollama_host configured:        ← HIGHEST PRIORITY (air-gapped)     │
-│       use Ollama (local inference)                                       │
+│   L0 (Trivial)   →  0 models   Rules-based only (docs, formatting)      │
+│   L1 (Low)       →  1 model    Single model review                      │
+│   L2 (Medium)    →  2 models   Dual review + rubric scoring             │
+│   L3 (High)      →  3 models   Triple review + rubric + approval req    │
+│   L4 (Critical)  →  3 models   Triple review + rubric + HUMAN approval  │
 │                                                                          │
-│   elif openrouter_api_key configured:                                    │
-│       use OpenRouter (100+ models via single API)                        │
-│                                                                          │
-│   elif anthropic_api_key configured:                                     │
-│       use Anthropic Claude directly                                      │
-│                                                                          │
-│   elif openai_api_key configured:   ← LOWEST PRIORITY                   │
-│       use OpenAI GPT directly                                            │
-│                                                                          │
-│   else:                                                                  │
-│       skip AI analysis (rule-based only)                                 │
+│   ┌──────────────────────────────────────────────────────────────────┐  │
+│   │  CONSENSUS OUTPUT:                                               │  │
+│   │   • consensus_risk: "approve" | "request_changes" | "comment"    │  │
+│   │   • agreement_score: 0.0 - 1.0 (model agreement %)               │  │
+│   │   • combined_concerns: deduplicated from all models              │  │
+│   │   • rubric_summary: averaged scores per dimension                │  │
+│   │   • dissenting_opinions: models that disagreed                   │  │
+│   └──────────────────────────────────────────────────────────────────┘  │
 │                                                                          │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-| Provider | Data Residency | Models | Best For |
-|----------|----------------|--------|----------|
-| **Ollama** | Your infrastructure | Llama, Mistral, CodeLlama | Air-gapped/regulated environments |
-| **OpenRouter** | OpenRouter servers | 100+ (Claude, GPT, Gemini, Llama) | Flexibility, model switching |
-| **Anthropic** | Anthropic servers | Claude family | Direct Claude access |
-| **OpenAI** | OpenAI servers | GPT family | Existing OpenAI users |
+### Flexible Model Configuration
+
+Configure **any combination** of models - same provider or mixed:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                     EXAMPLE CONFIGURATIONS                               │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Option 1: All OpenRouter (recommended - single API)                     │
+│    model_1: anthropic/claude-4.5-sonnet                                  │
+│    model_2: openai/gpt-5.2                                               │
+│    model_3: google/gemini-3-flash                                        │
+│                                                                          │
+│  Option 2: All Ollama (air-gapped)                                       │
+│    model_1: llama4                                                       │
+│    model_2: mistral-large                                                │
+│    model_3: codellama-70b                                                │
+│                                                                          │
+│  Option 3: Mixed direct APIs                                             │
+│    model_1: claude-4.5-haiku    (anthropic_api_key)                      │
+│    model_2: gpt-5.2-mini        (openai_api_key)                         │
+│    model_3: llama4              (ollama_host)                            │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+| Provider | Data Residency | Default Models | Best For |
+|----------|----------------|----------------|----------|
+| **Ollama** | Your infrastructure | llama4, mistral-large, codellama-70b | Air-gapped/regulated |
+| **OpenRouter** | OpenRouter servers | Claude 4.5, GPT 5.2, Gemini 3 | Flexibility, diversity |
+| **Anthropic** | Anthropic servers | Claude 4.5 Haiku | Direct Claude access |
+| **OpenAI** | OpenAI servers | GPT 5.2 Mini | Existing OpenAI users |
 
 ### Risk Tiers
 
-| Tier | Label | Description | Default Action |
-|------|-------|-------------|----------------|
-| **L0** | Trivial | Docs, comments, formatting | Auto-approve |
-| **L1** | Low | Tests, non-critical code | Auto-approve |
-| **L2** | Medium | Feature code, minor changes | Auto-approve |
-| **L3** | High | Auth, config, sensitive areas | Requires approval |
-| **L4** | Critical | Payments, PII, security, crypto | Requires approval |
+| Tier | Label | AI Models | Rubric | Description | Default Action |
+|------|-------|-----------|--------|-------------|----------------|
+| **L0** | Trivial | 0 (none) | No | Docs, comments, formatting | Auto-approve |
+| **L1** | Low | 1 | No | Tests, non-critical code | Auto-approve |
+| **L2** | Medium | 2 | Yes | Feature code, minor changes | Auto-approve |
+| **L3** | High | 3 | Yes | Auth, config, sensitive areas | Requires approval |
+| **L4** | Critical | 3 | Yes | Payments, PII, security, crypto | Requires HUMAN approval |
 
 ---
 
@@ -300,12 +338,15 @@ Export findings to GitHub Security tab:
 | `generate_bundle` | Create evidence bundle artifact | `true` |
 | `upload_sarif` | Upload to GitHub Security tab | `false` |
 | `fail_on_high_risk` | Block merge if over threshold | `true` |
-| `openai_api_key` | OpenAI key for AI summary (optional) | - |
-| `anthropic_api_key` | Anthropic key for AI summary (optional) | - |
-| `openrouter_api_key` | OpenRouter key for AI summary (optional) | - |
-| `openrouter_model` | Model to use with OpenRouter | `anthropic/claude-sonnet-4` |
+| **Model Configuration** | | |
+| `model_1` | First model (L1+). Format: `provider/model` or just `model` | Auto-detect |
+| `model_2` | Second model (L2+). Format: `provider/model` or just `model` | Auto-detect |
+| `model_3` | Third model (L3+). Format: `provider/model` or just `model` | Auto-detect |
+| **API Keys** | | |
+| `openai_api_key` | OpenAI key for GPT models (optional) | - |
+| `anthropic_api_key` | Anthropic key for Claude models (optional) | - |
+| `openrouter_api_key` | OpenRouter key (access 100+ models) (optional) | - |
 | `ollama_host` | Ollama server URL for local AI (optional) | - |
-| `ollama_model` | Model to use with Ollama | `llama3.3` |
 
 ### Outputs
 
@@ -316,6 +357,9 @@ Export findings to GitHub Security tab:
 | `bundle_path` | Path to evidence bundle |
 | `findings_count` | Number of policy findings |
 | `requires_approval` | Whether approval needed (true/false) |
+| `models_used` | Number of AI models that reviewed |
+| `consensus_risk` | Multi-model consensus: approve/request_changes/comment |
+| `agreement_score` | How much models agreed (0.0-1.0) |
 
 ## Advanced Usage
 
@@ -327,65 +371,74 @@ Export findings to GitHub Security tab:
     risk_threshold: ${{ github.base_ref == 'main' && 'L2' || 'L3' }}
 ```
 
-### AI-Powered Analysis
+### Multi-Model AI Configuration
 
-Add an AI API key for intelligent diff summarization. You have three options:
+Configure up to 3 AI models for tier-based review. Models are used based on risk tier (L1: 1 model, L2: 2 models, L3+: 3 models).
 
-#### Option 1: OpenRouter (Recommended - 100+ models)
+#### Option 1: OpenRouter (Recommended - 3 diverse models via single API)
 
-OpenRouter gives you access to Claude, GPT-4, Gemini, Llama, and 100+ other models through a single API.
-
-**Step 1: Get your API key**
-1. Go to [openrouter.ai](https://openrouter.ai/)
-2. Sign up or log in
-3. Navigate to **Keys** in the dashboard
-4. Click **Create Key**
-5. Copy your key (starts with `sk-or-...`)
-
-**Step 2: Add the secret to your GitHub repository**
-1. Go to your repository on GitHub
-2. Click **Settings** > **Secrets and variables** > **Actions**
-3. Click **New repository secret**
-4. Name: `OPENROUTER_API_KEY`
-5. Value: Paste your OpenRouter API key
-6. Click **Add secret**
-
-**Step 3: Use in your workflow**
 ```yaml
 - uses: DNYoussef/codeguard-action@v1
   with:
     github_token: ${{ secrets.GITHUB_TOKEN }}
     openrouter_api_key: ${{ secrets.OPENROUTER_API_KEY }}
-    openrouter_model: anthropic/claude-sonnet-4  # or any model below
+    model_1: anthropic/claude-4.5-sonnet   # Used for L1+
+    model_2: openai/gpt-5.2                 # Used for L2+
+    model_3: google/gemini-3-flash          # Used for L3+
 ```
 
-**Popular OpenRouter models:**
+**Popular OpenRouter models (Jan 2026):**
 | Model | ID | Best For |
 |-------|-----|----------|
-| Claude Opus 4.5 | `anthropic/claude-opus-4.5` | Best reasoning |
-| Claude Sonnet 4 | `anthropic/claude-sonnet-4` | Fast + quality (default) |
-| GPT-4o | `openai/gpt-4o` | Good balance |
-| Gemini 3 | `google/gemini-3` | Google's latest |
-| Codex 5.2 | `openai/codex-5.2` | Code-focused |
-| Llama 3.3 70B | `meta-llama/llama-3.3-70b-instruct` | Open source |
+| Claude 4.5 Sonnet | `anthropic/claude-4.5-sonnet` | Fast + quality (default) |
+| Claude 4.5 Opus | `anthropic/claude-4.5-opus` | Best reasoning |
+| GPT 5.2 | `openai/gpt-5.2` | Good balance |
+| Gemini 3 Flash | `google/gemini-3-flash` | Fast, multimodal |
+| Llama 4 70B | `meta-llama/llama-4-70b-instruct` | Open source |
 
-#### Option 2: Anthropic Direct
+#### Option 2: Ollama (Air-Gapped - 3 local models)
 
 ```yaml
 - uses: DNYoussef/codeguard-action@v1
   with:
-    anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+    github_token: ${{ secrets.GITHUB_TOKEN }}
+    ollama_host: http://localhost:11434
+    model_1: llama4
+    model_2: mistral-large
+    model_3: codellama-70b
 ```
 
-#### Option 3: OpenAI Direct
+#### Option 3: Mixed Providers (diversity of opinion)
 
 ```yaml
+- uses: DNYoussef/codeguard-action@v1
+  with:
+    github_token: ${{ secrets.GITHUB_TOKEN }}
+    anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+    openai_api_key: ${{ secrets.OPENAI_API_KEY }}
+    ollama_host: http://localhost:11434
+    model_1: claude-4.5-haiku    # Uses Anthropic
+    model_2: gpt-5.2-mini        # Uses OpenAI
+    model_3: llama4              # Uses Ollama
+```
+
+#### Option 4: Single Provider (legacy/simple)
+
+Just provide one API key - CodeGuard will use default models:
+
+```yaml
+# Anthropic only (uses Claude 4.5 Haiku for all tiers)
+- uses: DNYoussef/codeguard-action@v1
+  with:
+    anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+
+# OpenAI only (uses GPT 5.2 Mini for all tiers)
 - uses: DNYoussef/codeguard-action@v1
   with:
     openai_api_key: ${{ secrets.OPENAI_API_KEY }}
 ```
 
-#### Option 4: Ollama (Local/On-Prem - Air-Gapped)
+#### Ollama Setup (Local/On-Prem - Air-Gapped)
 
 Ollama runs models locally - no data leaves your infrastructure. Perfect for enterprises with strict data residency requirements.
 
@@ -421,26 +474,26 @@ jobs:
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           ollama_host: http://localhost:11434
-          ollama_model: llama3.3
+          ollama_model: llama4
 ```
 
-**Popular Ollama models:**
+**Popular Ollama models (Jan 2026):**
 | Model | ID | Size | Best For |
 |-------|-----|------|----------|
-| Llama 3.3 70B | `llama3.3` | 40GB | Best quality |
-| Llama 3.2 | `llama3.2` | 2GB | Fast, small |
-| CodeLlama | `codellama` | 7GB | Code-focused |
-| Mistral | `mistral` | 4GB | Good balance |
-| Mixtral | `mixtral` | 26GB | MoE architecture |
-| Phi-3 | `phi3` | 2GB | Microsoft's compact |
-| Qwen 2.5 | `qwen2.5` | 4GB | Multilingual |
+| Llama 4 70B | `llama4` | 40GB | Best quality |
+| Llama 4 8B | `llama4:8b` | 5GB | Fast, balanced |
+| CodeLlama 70B | `codellama-70b` | 40GB | Code-focused |
+| Mistral Large | `mistral-large` | 12GB | Good reasoning |
+| Mixtral 8x22B | `mixtral-8x22b` | 80GB | MoE architecture |
+| Phi-4 | `phi4` | 4GB | Microsoft's compact |
+| Qwen 3 | `qwen3` | 8GB | Multilingual |
 
 **Remote Ollama server:**
 ```yaml
 - uses: DNYoussef/codeguard-action@v1
   with:
     ollama_host: http://your-ollama-server.internal:11434
-    ollama_model: llama3.3
+    ollama_model: llama4
 ```
 
 ### Archive Evidence Bundles
