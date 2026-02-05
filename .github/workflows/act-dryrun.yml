@@ -1,8 +1,11 @@
 name: CodeGuard Act Dryrun
 
 on:
+  push:
+    branches: [main]
   pull_request:
-    types: [opened]
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
 
 jobs:
   dryrun:
