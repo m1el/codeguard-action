@@ -33,6 +33,16 @@ def parse_bool(value: str) -> bool:
     return value.lower() in ("true", "1", "yes")
 
 
+def resolve_path(raw: Optional[str], workspace: Path) -> Optional[Path]:
+    """Resolve a possibly-relative path against the GitHub workspace."""
+    if not raw:
+        return None
+    candidate = Path(raw)
+    if not candidate.is_absolute():
+        candidate = workspace / candidate
+    return candidate
+
+
 def main():
     """Main entrypoint for the action."""
     # Parse inputs from environment (set by GitHub Actions)
@@ -42,7 +52,7 @@ def main():
     post_comment = parse_bool(get_env("INPUT_POST_COMMENT", "true"))
     generate_bundle = parse_bool(get_env("INPUT_GENERATE_BUNDLE", "true"))
     upload_sarif = parse_bool(get_env("INPUT_UPLOAD_SARIF", "false"))
-    fail_on_high_risk = parse_bool(get_env("INPUT_FAIL_ON_HIGH_RISK", "true"))
+    fail_on_high_risk = parse_bool(get_env("INPUT_FAIL_ON_HIGH_RISK", "false"))
 
     # Optional AI API keys
     openai_key = get_env("INPUT_OPENAI_API_KEY") or get_env("OPENAI_API_KEY")
@@ -59,6 +69,29 @@ def main():
     model_2 = get_env("INPUT_MODEL_2")  # Used for L2+
     model_3 = get_env("INPUT_MODEL_3")  # Used for L3+
     ai_review = parse_bool(get_env("INPUT_AI_REVIEW", "true"))
+
+    # Policy and rubric locations
+    workspace = Path(get_env("GITHUB_WORKSPACE", ".")).resolve()
+    rubrics_dir = resolve_path(get_env("INPUT_RUBRICS_DIR", ".guardspine/rubrics"), workspace)
+    risk_policy_path = resolve_path(get_env("INPUT_RISK_POLICY"), workspace)
+    bundle_dir = resolve_path(get_env("INPUT_BUNDLE_DIR", ".guardspine/bundles"), workspace) or (workspace / ".guardspine" / "bundles")
+
+    if risk_policy_path and not risk_policy_path.exists():
+        print(f"::error::Risk policy file not found: {risk_policy_path}")
+        sys.exit(1)
+
+    rubric_path: Optional[Path] = None
+    rubric_is_builtin = rubric in RiskClassifier.RUBRICS
+    if not rubric_is_builtin:
+        # Treat rubric as path; prefer workspace, then rubrics_dir
+        candidate = resolve_path(rubric, workspace)
+        if (not candidate or not candidate.exists()) and rubrics_dir:
+            candidate = resolve_path(rubric, rubrics_dir)
+        if candidate and candidate.exists():
+            rubric_path = candidate
+        else:
+            print(f"::error::Rubric file not found: {candidate if candidate else rubric}")
+            sys.exit(1)
 
     # GitHub context
     github_event_path = get_env("GITHUB_EVENT_PATH")
@@ -120,11 +153,20 @@ def main():
 
     # Classify risk
     print("::group::Classifying risk")
-    github_workspace = get_env("GITHUB_WORKSPACE")
-    if not github_workspace or not Path(github_workspace).exists():
+    if not workspace.exists():
         print("::error::GITHUB_WORKSPACE is not set - cannot locate repository root for rubric loading")
         sys.exit(1)
-    classifier = RiskClassifier(rubric=rubric, repo_root=github_workspace)
+    try:
+        classifier = RiskClassifier(
+            rubric=rubric,
+            rubric_path=rubric_path,
+            policy_path=risk_policy_path,
+            repo_root=workspace,
+        )
+    except Exception as exc:
+        print(f"::error::Failed to load rubric/policy: {exc}")
+        sys.exit(1)
+
     risk_result = classifier.classify(analysis)
     risk_tier = risk_result["risk_tier"]
     risk_drivers = risk_result["risk_drivers"]
@@ -184,8 +226,7 @@ def main():
         )
 
         # Save bundle
-        bundle_dir = Path(get_env("GITHUB_WORKSPACE", ".")) / ".guardspine"
-        bundle_dir.mkdir(exist_ok=True)
+        bundle_dir.mkdir(parents=True, exist_ok=True)
         bundle_path = bundle_dir / f"bundle-pr{pr_number}-{github_sha[:7]}.json"
 
         with open(bundle_path, "w") as f:
@@ -213,22 +254,34 @@ def main():
         print("::endgroup::")
 
     # Determine exit status
-    if requires_approval and fail_on_high_risk:
+    if requires_approval:
         print(f"::warning::Risk tier {risk_tier} exceeds threshold {risk_threshold}")
         print("::warning::Human approval required before merge")
 
         # Create check annotation
-        print(f"::error file=GUARDSPINE::Risk tier {risk_tier} requires human approval. "
+        print(f"::warning file=GUARDSPINE::Risk tier {risk_tier} requires human approval. "
               f"Review the Diff Postcard and approve in GuardSpine.")
 
-        sys.exit(1)
-    else:
-        print(f"::notice::Risk tier {risk_tier} - auto-approved")
-        sys.exit(0)
+        if fail_on_high_risk:
+            sys.exit(1)
+
+    print(f"::notice::Risk tier {risk_tier} - workflow completed")
+    sys.exit(0)
 
 
 def fetch_pr_diff(pr: PullRequest) -> str:
     """Fetch the diff content for a PR."""
+    stub_path = os.environ.get("STUB_DIFF_PATH")
+    if stub_path:
+        path = Path(stub_path)
+        if not path.is_absolute():
+            workspace = Path(os.environ.get("GITHUB_WORKSPACE", ".")).resolve()
+            path = workspace / path
+        if path.exists():
+            return path.read_text(encoding="utf-8")
+        print(f"::error::STUB_DIFF_PATH set but file not found: {path}")
+        sys.exit(1)
+
     import requests
 
     diff_url = pr.diff_url

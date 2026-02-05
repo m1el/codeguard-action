@@ -276,6 +276,37 @@ jobs:
           rubric: soc2
 ```
 
+## One-Page Install (TL;DR)
+
+1. **Secrets:** `GITHUB_TOKEN` (provided by GitHub) plus one AI provider if you want model review (`OPENROUTER_API_KEY` recommended; or `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `OLLAMA_HOST`).
+2. **Workflow (minimal):**
+```yaml
+name: CodeGuard
+on: [pull_request]
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DNYoussef/codeguard-action@v1
+        id: guard
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          risk_threshold: L3
+          bundle_dir: .guardspine/bundles
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidence-bundle
+          path: ${{ steps.guard.outputs.bundle_path }}
+```
+3. **Verify bundle locally:** `pip install guardspine-verify` then `guardspine-verify .guardspine/bundles/*.json`.
+4. **Troubleshooting**
+- Missing artifact: ensure `bundle_dir` matches the upload path and `generate_bundle` is true.
+- Hard fail on L4: set `fail_on_high_risk: false` (default) to emit warnings instead of failing the job.
+- Rubric regex crash: bad patterns are skipped with warnings; fix or remove the offending rule.
+- No AI review: set `ai_review: true` (default) and provide at least one model key/host.
+
 ## Features
 
 ### Diff Postcard (PR Comment)
@@ -337,7 +368,10 @@ Export findings to GitHub Security tab:
 | `post_comment` | Post Diff Postcard comment | `true` |
 | `generate_bundle` | Create evidence bundle artifact | `true` |
 | `upload_sarif` | Upload to GitHub Security tab | `false` |
-| `fail_on_high_risk` | Block merge if over threshold | `true` |
+| `fail_on_high_risk` | Block merge if over threshold (exit 1) | `false` |
+| `rubrics_dir` | Directory containing rubric YAML files | `.guardspine/rubrics` |
+| `risk_policy` | Path to YAML that overrides risk patterns/thresholds | - |
+| `bundle_dir` | Directory to write evidence bundles | `.guardspine/bundles` |
 | **Model Configuration** | | |
 | `model_1` | First model (L1+). Format: `provider/model` or just `model` | Auto-detect |
 | `model_2` | Second model (L2+). Format: `provider/model` or just `model` | Auto-detect |

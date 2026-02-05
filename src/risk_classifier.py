@@ -3,16 +3,12 @@ Risk Classifier - Assigns risk tiers (L0-L4) based on analysis.
 """
 
 import re
+import copy
 from pathlib import Path
 from typing import Any
 from dataclasses import dataclass
 
 import yaml
-
-
-# Directory containing built-in rubric files
-BUILTIN_RUBRICS_DIR = Path(__file__).parent.parent / "rubrics"
-
 
 @dataclass
 class Finding:
@@ -65,98 +61,165 @@ class RiskClassifier:
         ],
     }
 
-    def __init__(self, rubric: str = "default", repo_root: str | Path | None = None):
-        """
-        Initialize classifier with rubric.
-        
-        Args:
-            rubric: Name of the rubric to load (e.g., "default", "soc2", "hipaa")
-            repo_root: Path to the repository root. If provided, rubrics will be
-                      searched in the repo's .codeguard/rubrics/ or rubrics/ 
-                      directories before falling back to built-in rubrics.
-        """
+    # Rubric-specific rules
+    RUBRICS = {
+        "default": {},
+        "soc2": {
+            "CC6.1": {"pattern": r"(auth|access|permission)", "severity": "high", "message": "Change management control affected"},
+            "CC6.2": {"pattern": r"(user|account|provision)", "severity": "medium", "message": "Access provisioning affected"},
+            "CC7.1": {"pattern": r"(CVE|vulnerab|patch|security)", "severity": "critical", "message": "Vulnerability management"},
+            "CC8.1": {"pattern": r"(terraform|kubernetes|docker|infra)", "severity": "high", "message": "Infrastructure change"},
+        },
+        "hipaa": {
+            "164.312.a": {"pattern": r"(phi|patient|medical|health)", "severity": "critical", "message": "PHI access control affected"},
+            "164.312.b": {"pattern": r"(audit|log|trail)", "severity": "high", "message": "Audit control affected"},
+            "164.312.e": {"pattern": r"(encrypt|tls|ssl|https)", "severity": "critical", "message": "Transmission security"},
+        },
+        "pci-dss": {
+            "3.4": {"pattern": r"(pan|card.number|credit)", "severity": "critical", "message": "Cardholder data handling"},
+            "6.5": {"pattern": r"(sql|inject|xss|csrf)", "severity": "critical", "message": "Secure coding requirement"},
+            "8.3": {"pattern": r"(password|mfa|auth)", "severity": "high", "message": "Authentication control"},
+        },
+    }
+
+    DEFAULT_ZONE_SEVERITY = {
+        "payment": "critical",
+        "crypto": "critical",
+        "pii": "critical",
+        "auth": "high",
+        "security": "high",
+        "database": "high",
+        "config": "medium",
+        "infra": "medium",
+    }
+
+    DEFAULT_SIZE_THRESHOLDS = {
+        "large": 500,
+        "medium": 100,
+        "small": 20,
+    }
+
+    def __init__(
+        self,
+        rubric: str = "default",
+        rubric_path: str | Path | None = None,
+        policy_path: str | Path | None = None,
+        repo_root: str | Path | None = None,
+    ):
+        """Initialize classifier with rubric and optional policy overrides."""
         self.rubric = rubric
         self.repo_root = Path(repo_root) if repo_root else None
-        self.rubric_rules = self._load_rubric(rubric)
+        self.rubric_path = Path(rubric_path) if rubric_path else None
 
-    def _load_rubric(self, rubric: str) -> dict[str, dict]:
-        """
-        Load rubric rules from YAML file.
-        
-        Search order:
-        1. <repo_root>/.codeguard/rubrics/<rubric>.yaml
-        2. <repo_root>/rubrics/<rubric>.yaml  
-        3. Built-in: rubrics/builtin/<rubric>.yaml
-        4. Built-in: rubrics/builtin/<rubric>-*.yaml (partial match)
-        5. Built-in: rubrics/<rubric>.yaml
-        
-        Returns dict mapping rule_id to {pattern, severity, message}.
-        """
-        rules = {}
-        candidates = []
-        
-        # Check repository-local rubrics first
-        if self.repo_root:
-            repo_rubric_dirs = [
+        # If no explicit rubric path and rubric not built-in, try repo-local rubrics
+        if not self.rubric_path and rubric not in self.RUBRICS and self.repo_root:
+            for candidate_dir in [
                 self.repo_root / ".codeguard" / "rubrics",
                 self.repo_root / ".github" / "codeguard" / "rubrics",
                 self.repo_root / "rubrics",
-            ]
-            for rubric_dir in repo_rubric_dirs:
-                candidates.append(rubric_dir / f"{rubric}.yaml")
-                candidates.append(rubric_dir / f"{rubric}.yml")
-        
-        # Built-in rubrics (exact match first)
-        candidates.extend([
-            BUILTIN_RUBRICS_DIR / "builtin" / f"{rubric}.yaml",
-            BUILTIN_RUBRICS_DIR / f"{rubric}.yaml",
-        ])
-        
-        # Also check for partial matches in builtin (e.g., "soc2" matches "soc2-controls.yaml")
-        builtin_dir = BUILTIN_RUBRICS_DIR / "builtin"
-        if builtin_dir.exists():
-            for f in builtin_dir.glob(f"{rubric}*.yaml"):
-                if f not in candidates:
-                    candidates.append(f)
-            for f in builtin_dir.glob(f"*{rubric}*.yaml"):
-                if f not in candidates:
-                    candidates.append(f)
-        
-        # Find first existing file
-        rubric_file = None
-        for candidate in candidates:
-            if candidate.exists():
-                rubric_file = candidate
-                break
-        
-        if rubric_file is None:
-            return rules
-        
+            ]:
+                for ext in (".yaml", ".yml"):
+                    candidate = candidate_dir / f"{rubric}{ext}"
+                    if candidate.exists():
+                        self.rubric_path = candidate
+                        break
+                if self.rubric_path:
+                    break
+
+        # Mutable copies of defaults so policy overrides don't leak across runs
+        self.file_patterns = copy.deepcopy(self.FILE_PATTERNS)
+        self.zone_severity = dict(self.DEFAULT_ZONE_SEVERITY)
+        self.size_thresholds = dict(self.DEFAULT_SIZE_THRESHOLDS)
+
+        self.rubric_rules, self.rubric_errors = self._load_rubric_rules()
+
+        if policy_path:
+            self._load_policy(Path(policy_path))
+
+    def _load_rubric_rules(self) -> tuple[list[dict], list[str]]:
+        """Load rubric rules from built-ins or a YAML file."""
+        rules: list[dict] = []
+        errors: list[str] = []
+
+        if self.rubric_path:
+            if not self.rubric_path.exists():
+                raise FileNotFoundError(f"Rubric file not found: {self.rubric_path}")
+            try:
+                raw = yaml.safe_load(self.rubric_path.read_text()) or {}
+            except Exception as exc:
+                raise ValueError(f"Failed to parse rubric YAML {self.rubric_path}: {exc}") from exc
+
+            raw_rules = raw.get("rules") if isinstance(raw, dict) else raw
+            if isinstance(raw_rules, dict):
+                iterable = [{"id": rid, **val} for rid, val in raw_rules.items()]
+            elif isinstance(raw_rules, list):
+                iterable = raw_rules
+            else:
+                iterable = []
+
+            for idx, rule in enumerate(iterable):
+                try:
+                    compiled = re.compile(rule["pattern"], re.IGNORECASE)
+                except Exception as exc:
+                    errors.append(f"Rule {rule.get('id') or idx} skipped: {exc}")
+                    compiled = None
+                rules.append({
+                    "id": rule.get("id") or f"rule_{idx}",
+                    "severity": rule.get("severity", "medium"),
+                    "message": rule.get("message", "Policy rule triggered"),
+                    "pattern": rule.get("pattern", ""),
+                    "compiled": compiled,
+                })
+        else:
+            for rid, rule in self.RUBRICS.get(self.rubric, {}).items():
+                try:
+                    compiled = re.compile(rule["pattern"], re.IGNORECASE)
+                except Exception as exc:
+                    errors.append(f"Rule {rid} skipped: {exc}")
+                    compiled = None
+                rules.append({
+                    "id": rid,
+                    "severity": rule.get("severity", "medium"),
+                    "message": rule.get("message", "Policy rule triggered"),
+                    "pattern": rule.get("pattern", ""),
+                    "compiled": compiled,
+                })
+
+        for err in errors:
+            self._warn(err)
+        return rules, errors
+
+    def _load_policy(self, path: Path) -> None:
+        """Load risk policy YAML to override patterns and thresholds."""
+        if not path.exists():
+            raise FileNotFoundError(f"Risk policy file not found: {path}")
+
         try:
-            with open(rubric_file, "r", encoding="utf-8") as f:
-                data = yaml.safe_load(f)
-        except (yaml.YAMLError, OSError):
-            return rules
-        
-        if not data or "rules" not in data:
-            return rules
-        
-        for rule in data.get("rules", []):
-            rule_id = rule.get("id", "")
-            patterns = rule.get("patterns", [])
-            severity = rule.get("severity", "medium")
-            message = rule.get("description") or rule.get("name", "Policy violation")
-            
-            if rule_id and patterns:
-                # Combine patterns with OR
-                combined_pattern = "|".join(f"({p})" for p in patterns)
-                rules[rule_id] = {
-                    "pattern": combined_pattern,
-                    "severity": severity,
-                    "message": message,
-                }
-        
-        return rules
+            policy = yaml.safe_load(path.read_text()) or {}
+        except Exception as exc:
+            self._warn(f"Risk policy ignored (parse error): {exc}")
+            return
+
+        patterns = policy.get("file_patterns")
+        if isinstance(patterns, dict):
+            for tier, values in patterns.items():
+                if tier in self.file_patterns and isinstance(values, list):
+                    self.file_patterns[tier] = values
+
+        zone_severity = policy.get("zone_severity")
+        if isinstance(zone_severity, dict):
+            for zone, sev in zone_severity.items():
+                self.zone_severity[zone] = sev
+
+        size_thresholds = policy.get("size_thresholds")
+        if isinstance(size_thresholds, dict):
+            self.size_thresholds["large"] = int(size_thresholds.get("large", self.size_thresholds["large"]))
+            self.size_thresholds["medium"] = int(size_thresholds.get("medium", self.size_thresholds["medium"]))
+            self.size_thresholds["small"] = int(size_thresholds.get("small", self.size_thresholds["small"]))
+
+    def _warn(self, message: str) -> None:
+        """Emit a warning in GitHub Actions-friendly format."""
+        print(f"::warning::{message}")
 
     def classify(self, analysis: dict[str, Any]) -> dict[str, Any]:
         """
@@ -217,22 +280,22 @@ class RiskClassifier:
             path = file.get("path", "")
 
             # Check L4 patterns first
-            for pattern in self.FILE_PATTERNS["L4"]:
+            for pattern in self.file_patterns["L4"]:
                 if re.search(pattern, path, re.IGNORECASE):
                     max_score = max(max_score, 4)
 
-            for pattern in self.FILE_PATTERNS["L3"]:
+            for pattern in self.file_patterns["L3"]:
                 if re.search(pattern, path, re.IGNORECASE):
                     max_score = max(max_score, 3)
 
             # L0 patterns reduce score (but don't override higher)
             is_trivial = any(
                 re.search(p, path, re.IGNORECASE)
-                for p in self.FILE_PATTERNS["L0"]
+                for p in self.file_patterns["L0"]
             )
             is_test = any(
                 re.search(p, path, re.IGNORECASE)
-                for p in self.FILE_PATTERNS["L1"]
+                for p in self.file_patterns["L1"]
             )
 
             if max_score == 0:
@@ -250,21 +313,14 @@ class RiskClassifier:
         if not zones:
             return 0
 
-        zone_types = set(z.get("zone") for z in zones)
+        severity_rank = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
+        max_score = 0
 
-        # Critical zones
-        if zone_types & {"payment", "crypto", "pii"}:
-            return 4
+        for z in zones:
+            sev = self.zone_severity.get(z.get("zone"), "medium")
+            max_score = max(max_score, severity_rank.get(sev, 2))
 
-        # High zones
-        if zone_types & {"auth", "security", "database"}:
-            return 3
-
-        # Medium zones
-        if zone_types & {"config", "infra"}:
-            return 2
-
-        return 1
+        return max_score
 
     def _score_size(self, analysis: dict) -> int:
         """Score based on change size."""
@@ -272,11 +328,11 @@ class RiskClassifier:
         removed = analysis.get("lines_removed", 0)
         total = added + removed
 
-        if total > 500:
+        if total > self.size_thresholds["large"]:
             return 3  # Large changes need review
-        elif total > 100:
+        elif total > self.size_thresholds["medium"]:
             return 2
-        elif total > 20:
+        elif total > self.size_thresholds["small"]:
             return 1
         return 0
 
@@ -285,7 +341,7 @@ class RiskClassifier:
         findings = []
 
         for zone in zones:
-            severity = "high" if zone["zone"] in {"payment", "crypto", "pii", "auth"} else "medium"
+            severity = self.zone_severity.get(zone["zone"], "medium")
             findings.append(Finding(
                 id=f"ZONE-{zone['zone'].upper()}",
                 severity=severity,
@@ -298,28 +354,48 @@ class RiskClassifier:
 
         return findings
 
+    def _find_match_line(self, pattern: re.Pattern, file: dict) -> int | None:
+        """Return first matching line number for a rule within a file change."""
+        for hunk in file.get("hunks", []):
+            for line in hunk.get("lines", []):
+                if line.get("type") not in ("add", "remove"):
+                    continue
+                try:
+                    if pattern.search(line.get("content", "")):
+                        return line.get("line_number")
+                except re.error as exc:
+                    self._warn(f"Rubric regex error: {exc}")
+                    return None
+        return None
+
     def _apply_rubric(self, files: list) -> list[Finding]:
         """Apply rubric-specific rules."""
         findings = []
 
         for file in files:
             path = file.get("path", "")
-            content = ""
-            for hunk in file.get("hunks", []):
-                for line in hunk.get("lines", []):
-                    if line.get("type") in ("add", "remove"):
-                        content += line.get("content", "") + "\n"
+            for rule in self.rubric_rules:
+                compiled = rule.get("compiled")
+                if not compiled:
+                    continue
 
-            for rule_id, rule in self.rubric_rules.items():
-                if re.search(rule["pattern"], path + content, re.IGNORECASE):
-                    findings.append(Finding(
-                        id=f"RUBRIC-{rule_id}",
-                        severity=rule["severity"],
-                        message=rule["message"],
-                        file=path,
-                        line=None,
-                        rule_id=rule_id,
-                    ))
+                try:
+                    matched_line = self._find_match_line(compiled, file)
+                    path_match = compiled.search(path)
+                    if matched_line is None and not path_match:
+                        continue
+                except re.error as exc:
+                    self._warn(f"Rubric rule {rule.get('id')} skipped: {exc}")
+                    continue
+
+                findings.append(Finding(
+                    id=f"RUBRIC-{rule.get('id')}",
+                    severity=rule.get("severity", "medium"),
+                    message=rule.get("message", "Policy rule triggered"),
+                    file=path,
+                    line=matched_line,
+                    rule_id=rule.get("id", ""),
+                ))
 
         return findings
 

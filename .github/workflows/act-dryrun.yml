@@ -1,0 +1,34 @@
+name: CodeGuard Act Dryrun
+
+on:
+  pull_request:
+    types: [opened]
+
+jobs:
+  dryrun:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: GuardSpine CodeGuard (stubbed offline)
+        id: guard
+        uses: ./
+        env:
+          PYTHONPATH: "/action/tests/stubs"
+          STUB_DIFF_PATH: "tests/fixtures/diff.patch"
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          post_comment: false
+          generate_bundle: true
+          upload_sarif: false
+          fail_on_high_risk: false
+          risk_threshold: L3
+          rubrics_dir: "."
+          bundle_dir: ".guardspine/bundles"
+
+      - name: Assert L4 warning and bundle present
+        shell: bash
+        run: |
+          echo "Risk tier: ${{ steps.guard.outputs.risk_tier }}"
+          test "${{ steps.guard.outputs.risk_tier }}" = "L4"
+          ls -l .guardspine/bundles

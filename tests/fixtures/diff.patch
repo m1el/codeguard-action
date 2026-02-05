@@ -1,0 +1,13 @@
+diff --git a/src/payments/handler.py b/src/payments/handler.py
+index e69de29..b123abc 100644
+--- a/src/payments/handler.py
++++ b/src/payments/handler.py
+@@
+-def charge(customer_id, amount_cents):
+-    # TODO: implement
+-    pass
++def charge(customer_id, amount_cents):
++    # Critical payment path updated
++    if amount_cents > 100000:
++        raise ValueError("payment over limit")
++    process_payment(customer_id, amount_cents)

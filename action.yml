@@ -34,7 +34,7 @@ inputs:
   fail_on_high_risk:
     description: 'Fail the check if risk exceeds threshold'
     required: false
-    default: 'true'
+    default: 'false'
   openai_api_key:
     description: 'OpenAI API key for AI-powered analysis (optional)'
     required: false
@@ -68,6 +68,17 @@ inputs:
     description: 'Enable AI-powered code review (requires at least one API key)'
     required: false
     default: 'true'
+  rubrics_dir:
+    description: 'Directory containing rubric YAML files (relative paths allowed)'
+    required: false
+    default: '.guardspine/rubrics'
+  risk_policy:
+    description: 'Path to YAML file defining custom risk patterns/thresholds'
+    required: false
+  bundle_dir:
+    description: 'Directory to write evidence bundles (relative to workspace)'
+    required: false
+    default: '.guardspine/bundles'
 
 outputs:
   risk_tier:
