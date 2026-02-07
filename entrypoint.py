@@ -46,6 +46,36 @@ def resolve_path(raw: Optional[str], workspace: Path) -> Optional[Path]:
     return candidate
 
 
+def resolve_existing_file(
+    raw: Optional[str],
+    bases: list[Path],
+    extensions: tuple[str, ...] = ("", ".yaml", ".yml"),
+) -> Optional[Path]:
+    """Resolve an input path/name to an existing file across base directories."""
+    if not raw:
+        return None
+
+    candidate = Path(raw)
+    roots = [Path(p) for p in bases]
+    if candidate.is_absolute():
+        roots = [Path(".")]
+    elif Path(".") not in roots:
+        roots.append(Path("."))
+
+    seen: set[Path] = set()
+    for root in roots:
+        base = candidate if candidate.is_absolute() else (root / candidate)
+        for ext in extensions:
+            test = base if (ext == "" or base.suffix) else base.with_suffix(ext)
+            resolved = test.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            if resolved.exists():
+                return resolved
+    return None
+
+
 def main():
     """Main entrypoint for the action."""
     # Parse inputs from environment (set by GitHub Actions)
@@ -81,30 +111,48 @@ def main():
     auto_merge_method = get_env("INPUT_AUTO_MERGE_METHOD", "squash")
 
     # Decision policy
-    decision_policy = get_env("INPUT_DECISION_POLICY", "standard")
+    decision_policy_raw = get_env("INPUT_DECISION_POLICY", "standard")
 
     # Policy and rubric locations
     workspace = Path(get_env("GITHUB_WORKSPACE", ".")).resolve()
     rubrics_dir = resolve_path(get_env("INPUT_RUBRICS_DIR", ".guardspine/rubrics"), workspace)
     risk_policy_path = resolve_path(get_env("INPUT_RISK_POLICY"), workspace)
     bundle_dir = resolve_path(get_env("INPUT_BUNDLE_DIR", ".guardspine/bundles"), workspace) or (workspace / ".guardspine" / "bundles")
+    decision_policy = decision_policy_raw
+
+    if decision_policy_raw not in {"standard", "strict", "advisory"}:
+        resolved_policy = resolve_existing_file(
+            decision_policy_raw,
+            bases=[workspace],
+            extensions=("", ".yaml", ".yml"),
+        )
+        if not resolved_policy:
+            print(f"::error::Decision policy file not found: {decision_policy_raw}")
+            sys.exit(1)
+        decision_policy = str(resolved_policy)
 
     if risk_policy_path and not risk_policy_path.exists():
         print(f"::error::Risk policy file not found: {risk_policy_path}")
         sys.exit(1)
 
     rubric_path: Optional[Path] = None
-    rubric_is_builtin = rubric in RiskClassifier.RUBRICS
-    if not rubric_is_builtin:
-        # Treat rubric as path; prefer workspace, then rubrics_dir
-        candidate = resolve_path(rubric, workspace)
-        if (not candidate or not candidate.exists()) and rubrics_dir:
-            candidate = resolve_path(rubric, rubrics_dir)
-        if candidate and candidate.exists():
-            rubric_path = candidate
-        else:
-            print(f"::error::Rubric file not found: {candidate if candidate else rubric}")
+    builtin_rubrics = RiskClassifier.discover_builtin_rubrics(workspace)
+    builtin_names = RiskClassifier.builtin_names(workspace)
+    if rubric in builtin_rubrics:
+        rubric_path = builtin_rubrics[rubric]
+    elif rubric not in builtin_names:
+        bases = [workspace]
+        if rubrics_dir:
+            bases.append(rubrics_dir)
+        resolved_rubric = resolve_existing_file(
+            rubric,
+            bases=bases,
+            extensions=("", ".yaml", ".yml"),
+        )
+        if not resolved_rubric:
+            print(f"::error::Rubric file not found: {rubric}")
             sys.exit(1)
+        rubric_path = resolved_rubric
 
     # GitHub context
     github_event_path = get_env("GITHUB_EVENT_PATH")
@@ -190,17 +238,33 @@ def main():
     print(f"Findings: {len(findings)}")
     print("::endgroup::")
 
-    # Determine if approval required
+    # Risk threshold context
     tier_order = ["L0", "L1", "L2", "L3", "L4"]
     threshold_index = tier_order.index(risk_threshold)
     risk_index = tier_order.index(risk_tier)
-    requires_approval = risk_index >= threshold_index
+    tier_exceeds_threshold = risk_index >= threshold_index
 
     # --- Decision Engine ---
     print("::group::Running Decision Engine")
     audit_findings = _map_findings(findings)
     engine = DecisionEngine(decision_policy)
     decision_packet = engine.decide(audit_findings)
+    if risk_tier == "L4" and decision_packet.decision == "merge":
+        print("::warning::L4 risk cannot auto-merge; forcing merge-with-conditions")
+        decision_packet.decision = "merge-with-conditions"
+        decision_packet.conditions = list(decision_packet.conditions) + [
+            AuditFinding(
+                severity="high",
+                category="governance",
+                location=None,
+                description="L4 risk tier requires human approval before merge",
+                recommendation="Require manual reviewer approval and release gate sign-off",
+                provable=False,
+            )
+        ]
+        decision_packet.total_findings = max(decision_packet.total_findings, len(audit_findings))
+
+    requires_approval = tier_exceeds_threshold or decision_packet.decision != "merge"
     decision_card_md = render_decision_card(decision_packet)
     print(f"Decision: {decision_packet.decision}")
     print(f"Hard blocks: {len(decision_packet.hard_blocks)}")
@@ -334,8 +398,14 @@ def _map_findings(finding_dicts: list[dict]) -> list[AuditFinding]:
             location = fd["file"]
             if fd.get("line"):
                 location += f":{fd['line']}"
-        # Zone findings and rubric findings with rule_id are pattern-matched = provable
-        provable = bool(fd.get("rule_id"))
+        provable_value = fd.get("provable")
+        if isinstance(provable_value, bool):
+            provable = provable_value
+        elif isinstance(provable_value, str):
+            provable = parse_bool(provable_value)
+        else:
+            # Backward compatibility for older finding payloads.
+            provable = bool(fd.get("rule_id")) and fd.get("rule_id") != "ai-consensus"
         mapped.append(AuditFinding(
             severity=fd.get("severity", "medium"),
             category=fd.get("zone", "general"),
@@ -363,7 +433,17 @@ def fetch_pr_diff(pr: PullRequest) -> str:
     import requests
 
     diff_url = pr.diff_url
-    response = requests.get(diff_url, timeout=30)
+    token = (
+        os.environ.get("INPUT_GITHUB_TOKEN")
+        or os.environ.get("GITHUB_TOKEN")
+    )
+    headers = {
+        "Accept": "application/vnd.github.v3.diff",
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    response = requests.get(diff_url, headers=headers, timeout=30)
     response.raise_for_status()
     return response.text
 
@@ -371,12 +451,17 @@ def fetch_pr_diff(pr: PullRequest) -> str:
 def set_output(name: str, value: str):
     """Set GitHub Actions output."""
     output_file = os.environ.get("GITHUB_OUTPUT")
+    text = str(value)
     if output_file:
-        with open(output_file, "a") as f:
-            f.write(f"{name}={value}\n")
+        delimiter = f"EOF_{hashlib.sha256(f'{name}:{text}'.encode()).hexdigest()[:16]}"
+        with open(output_file, "a", encoding="utf-8") as f:
+            f.write(f"{name}<<{delimiter}\n")
+            f.write(f"{text}\n")
+            f.write(f"{delimiter}\n")
     else:
-        # Fallback for older runners
-        print(f"::set-output name={name}::{value}")
+        # Legacy fallback with escaping.
+        escaped = text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+        print(f"::set-output name={name}::{escaped}")
 
 
 if __name__ == "__main__":

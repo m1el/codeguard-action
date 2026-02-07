@@ -65,7 +65,8 @@ class BundleGenerator:
         repository: str,
         commit_sha: str,
         approvers: list[str] = None,
-        attestation_key: Optional[str] = None
+        attestation_key: Optional[str] = None,
+        allow_insecure_signature_fallback: bool = False,
     ) -> dict[str, Any]:
         """
         Create a complete evidence bundle for a PR.
@@ -194,7 +195,11 @@ class BundleGenerator:
 
         # Add signature if key provided
         if attestation_key:
-            signature = self._sign_bundle(bundle, attestation_key)
+            signature = self._sign_bundle(
+                bundle,
+                attestation_key,
+                allow_insecure_fallback=allow_insecure_signature_fallback,
+            )
             bundle["signatures"].append(signature)
 
         return bundle
@@ -279,7 +284,12 @@ class BundleGenerator:
             "root_hash": root_hash,
         }
 
-    def _sign_bundle(self, bundle: dict, private_key: str) -> dict:
+    def _sign_bundle(
+        self,
+        bundle: dict,
+        private_key: str,
+        allow_insecure_fallback: bool = False,
+    ) -> dict:
         """
         Sign bundle with the provided private key.
 
@@ -338,7 +348,11 @@ class BundleGenerator:
                 "signed_at": signed_at,
                 "public_key_id": f"sha256:{public_fingerprint}",
             }
-        except ImportError:
+        except ImportError as exc:
+            if not allow_insecure_fallback:
+                raise ValueError(
+                    "cryptography library is required for strict signature mode"
+                ) from exc
             import hmac
             signature = hmac.new(private_key.encode(), canonical_bytes, hashlib.sha256).digest()
             return {
@@ -350,6 +364,8 @@ class BundleGenerator:
                 "note": "cryptography library not available; used HMAC-SHA256",
             }
         except Exception as exc:
+            if not allow_insecure_fallback:
+                raise ValueError(f"Invalid signing key: {exc}") from exc
             import hmac
             signature = hmac.new(private_key.encode(), canonical_bytes, hashlib.sha256).digest()
             return {

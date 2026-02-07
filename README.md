@@ -85,7 +85,7 @@ pip install guardspine-verify && guardspine-verify .guardspine/bundles/*.json
 │  ┌─────────────────────────────────────────────────────────────────────┐ │
 │  │  • Parse unified diff (unidiff)                                     │ │
 │  │  • Extract file changes, hunks, line-level modifications            │ │
-│  │  • Detect 8 sensitive zones:                                        │ │
+│  │  • Detect 13 sensitive zones:                                       │ │
 │  │    [auth] [payment] [crypto] [database] [security] [pii] [config]   │ │
 │  │    [infra]                                                          │ │
 │  │  • Generate SHA-256 diff hash for integrity                         │ │
@@ -133,7 +133,7 @@ pip install guardspine-verify && guardspine-verify .guardspine/bundles/*.json
 │  │   (auth/payment/pii)  │                                             │ │
 │  │                       ├──→ max(scores) ──→ ┌────────────────────┐   │ │
 │  │   Sensitive Zones ────┤                    │   L0 │ Trivial     │   │ │
-│  │   (8 zone types)      │                    │   L1 │ Low         │   │ │
+│  │   (13 zone types)     │                    │   L1 │ Low         │   │ │
 │  │                       │                    │   L2 │ Medium      │   │ │
 │  │   Change Size ────────┘                    │   L3 │ High    ⚠️  │   │ │
 │  │   (lines added/removed)                    │   L4 │ Critical ⛔ │   │ │
@@ -323,7 +323,7 @@ Export findings to GitHub Security tab:
 | Input | Description | Default |
 |-------|-------------|---------|
 | `risk_threshold` | Tier at which to require approval (L0-L4) | `L3` |
-| `rubric` | Policy rubric (soc2, hipaa, pci-dss, default) | `default` |
+| `rubric` | Policy rubric (default, security, soc2, hipaa, pci-dss, or custom YAML path) | `default` |
 | `github_token` | GitHub token for PR operations | Required |
 | `post_comment` | Post Diff Postcard comment | `true` |
 | `generate_bundle` | Create evidence bundle artifact | `true` |

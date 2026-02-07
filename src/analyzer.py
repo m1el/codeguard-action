@@ -76,7 +76,10 @@ class DiffAnalyzer:
         "pii": r"(email|phone|address|ssn|social.?security|date.?of.?birth)",
         "config": r"(config|setting|environment|env\.|\.env)",
         "infra": r"(terraform|kubernetes|docker|aws|azure|gcp|cloudformation)",
-        "command_injection": r"(subprocess|os\.system|os\.popen|child_process|shell\s*=\s*True|exec\(|eval\(|spawn)",
+        "command_injection": (
+            r"(os\.system|os\.popen|child_process|exec\(|eval\(|spawn|"
+            r"shell\s*=\s*True|subprocess\.(?:Popen|call)\s*\()"
+        ),
         "deserialization": r"(pickle\.load|yaml\.load\(|yaml\.unsafe_load|marshal\.load|shelve\.open|jsonpickle|unserialize|readObject)",
         "template_injection": r"(render_template_string|Template\(|Jinja2|mako\.template|format_map|\.safe_substitute|mark_safe|Markup\(|server.?side.?template)",
         "path_traversal": r"(\.\./|\.\.\\|os\.path\.join|path\.join|send_file|sendFile|readFile|shutil\.(copy|move|copytree)|extractall|zipfile\.ZipFile|tarfile\.open)",
@@ -302,8 +305,10 @@ class DiffAnalyzer:
                     }
                     hunk_data["lines"].append(line_data)
 
-                    # Check for sensitive patterns
-                    if line.is_added or line.is_removed:
+                    # Check for sensitive patterns on introduced lines only.
+                    # Removed lines are remediation context and should not
+                    # trigger new-risk findings.
+                    if line.is_added:
                         for zone_name, pattern in self.SENSITIVE_PATTERNS.items():
                             if re.search(pattern, line.value, re.IGNORECASE):
                                 sensitive_zones.append({
@@ -548,27 +553,27 @@ class DiffAnalyzer:
         rubric: str, use_rubric: bool,
     ) -> list[dict]:
         """Run independent reviews in parallel (Round 1)."""
-        reviews = []
+        reviews: list[dict | None] = [None] * len(providers)
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(providers)) as ex:
             future_to_provider = {
                 ex.submit(
                     self._get_model_review,
                     provider, model, diff_content, sensitive_zones, rubric, use_rubric
-                ): (provider, model)
-                for provider, model in providers
+                ): (idx, provider, model)
+                for idx, (provider, model) in enumerate(providers)
             }
             for future in concurrent.futures.as_completed(future_to_provider):
-                provider, model = future_to_provider[future]
+                idx, provider, model = future_to_provider[future]
                 try:
-                    reviews.append(future.result())
+                    reviews[idx] = future.result()
                 except Exception as e:
-                    reviews.append({
+                    reviews[idx] = {
                         "model_name": model, "provider": provider,
                         "error": str(e), "summary": "", "intent": "",
                         "concerns": [], "risk_assessment": "error",
                         "confidence": 0.0, "rubric_scores": {},
-                    })
-        return reviews
+                    }
+        return [r for r in reviews if r is not None]
 
     def _parallel_crosscheck(
         self, providers: list[tuple[str, str]],
@@ -577,7 +582,7 @@ class DiffAnalyzer:
         """Run cross-check reviews in parallel.  Each model sees the other
         models' previous-round findings but NOT the current round's, so all
         models in a round can execute concurrently."""
-        reviews = []
+        reviews: list[dict | None] = [None] * len(providers)
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(providers)) as ex:
             future_to_idx = {}
             for i, (provider, model) in enumerate(providers):
@@ -597,15 +602,15 @@ class DiffAnalyzer:
                     parsed["model_name"] = model
                     parsed["provider"] = provider
                     parsed["raw_response"] = raw[:500]
-                    reviews.append(parsed)
+                    reviews[idx] = parsed
                 except Exception as e:
-                    reviews.append({
+                    reviews[idx] = {
                         "model_name": model, "provider": provider,
                         "error": str(e), "summary": "", "intent": "",
                         "concerns": [], "risk_assessment": "error",
                         "confidence": 0.0, "rubric_scores": {},
-                    })
-        return reviews
+                    }
+        return [r for r in reviews if r is not None]
 
     def _build_crosscheck_prompt(
         self, diff_content: str, own_review: dict,

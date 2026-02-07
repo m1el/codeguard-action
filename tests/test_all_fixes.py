@@ -18,8 +18,9 @@ import tempfile
 import unittest
 import uuid
 import base64
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
 
 import yaml
 
@@ -350,9 +351,14 @@ class TestBundleIntegrity(unittest.TestCase):
     """Fix #4: bundles must remain valid after code changes."""
 
     def _make_bundle(self, attestation_key=None):
-        gh = Github("fake-token")
-        repo = gh.get_repo("test/repo")
-        pr = repo.get_pull(42)
+        pr = SimpleNamespace(
+            number=42,
+            title="Stub PR",
+            created_at=datetime.now(timezone.utc),
+            user=SimpleNamespace(login="stub-user"),
+            base=SimpleNamespace(ref="main"),
+            head=SimpleNamespace(ref="feature"),
+        )
 
         generator = BundleGenerator()
         analysis = make_analysis(files=make_files(), zones=make_zones(), added=4, removed=0)
@@ -421,7 +427,17 @@ class TestBundleIntegrity(unittest.TestCase):
         self.assertEqual(parsed.version, 4)
 
     def test_signature_shape_matches_v020_spec(self):
-        bundle = self._make_bundle(attestation_key="unit-test-secret")
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import ed25519
+
+        private_key = ed25519.Ed25519PrivateKey.generate()
+        pem = private_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        ).decode("utf-8")
+
+        bundle = self._make_bundle(attestation_key=pem)
         signatures = bundle.get("signatures", [])
         self.assertEqual(len(signatures), 1)
         sig = signatures[0]
@@ -531,10 +547,7 @@ class TestRubricLoading(unittest.TestCase):
     def test_builtin_rubrics_load(self):
         for name in ("default", "soc2", "hipaa", "pci-dss"):
             classifier = RiskClassifier(rubric=name)
-            if name == "default":
-                self.assertEqual(len(classifier.rubric_rules), 0)
-            else:
-                self.assertTrue(len(classifier.rubric_rules) > 0, f"{name} has no rules")
+            self.assertTrue(len(classifier.rubric_rules) > 0, f"{name} has no rules")
 
     def test_nonexistent_rubric_file_raises(self):
         with self.assertRaises(FileNotFoundError):

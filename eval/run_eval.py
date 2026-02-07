@@ -34,10 +34,10 @@ from src.risk_classifier import RiskClassifier
 from code_guard.audit import Finding as AuditFinding
 from decision.engine import DecisionEngine, render_decision_card
 
-# Thresholds (from pre-mortem plan)
-THRESHOLD_FP = 5.0
-THRESHOLD_FN = 5.0
-THRESHOLD_NOISE = 10.0
+# Thresholds (overridable for CI profiles)
+DEFAULT_THRESHOLD_FP = float(os.environ.get("CODEGUARD_EVAL_MAX_FP", "5.0"))
+DEFAULT_THRESHOLD_FN = float(os.environ.get("CODEGUARD_EVAL_MAX_FN", "5.0"))
+DEFAULT_THRESHOLD_NOISE = float(os.environ.get("CODEGUARD_EVAL_MAX_NOISE", "10.0"))
 
 TIER_MODEL_COUNT = {"L0": 0, "L1": 1, "L2": 2, "L3": 3, "L4": 3}
 
@@ -201,13 +201,20 @@ def _map_findings(finding_dicts: list) -> list[AuditFinding]:
         loc = fd.get("file", "")
         if fd.get("line"):
             loc += f":{fd['line']}"
+        provable_value = fd.get("provable")
+        if isinstance(provable_value, bool):
+            provable = provable_value
+        elif isinstance(provable_value, str):
+            provable = provable_value.lower() in ("true", "1", "yes")
+        else:
+            provable = bool(fd.get("rule_id")) and fd.get("rule_id") != "ai-consensus"
         mapped.append(AuditFinding(
             severity=fd.get("severity") or "medium",
             category=fd.get("zone") or "general",
             location=loc or None,
             description=fd.get("message") or "",
             recommendation=f"Review {fd.get('rule_id') or 'finding'}",
-            provable=bool(fd.get("rule_id")),
+            provable=provable,
         ))
     return mapped
 
@@ -227,7 +234,11 @@ def _empty_packet():
 # Report
 # ---------------------------------------------------------------------------
 
-def compute_stats(results: list[Result]) -> dict:
+def compute_stats(
+    results: list[Result],
+    threshold_fp: float,
+    threshold_fn: float,
+) -> dict:
     total = len(results)
     if total == 0:
         return {"total": 0}
@@ -252,13 +263,20 @@ def compute_stats(results: list[Result]) -> dict:
         "detect_rate_pct": round(detect_rate, 1),
         "fp": fp, "fp_rate_pct": round(fp_rate, 1),
         "fn": fn, "fn_rate_pct": round(fn_rate, 1),
-        "fp_pass": fp_rate < THRESHOLD_FP,
-        "fn_pass": fn_rate < THRESHOLD_FN,
+        "fp_pass": fp_rate < threshold_fp,
+        "fn_pass": fn_rate < threshold_fn,
         "tier_dist": dict(Counter(r.tier_final for r in results)),
     }
 
 
-def print_report(results: list[Result], stats: dict, elapsed: float, verbose: bool):
+def print_report(
+    results: list[Result],
+    stats: dict,
+    elapsed: float,
+    verbose: bool,
+    threshold_fp: float,
+    threshold_fn: float,
+):
     print("\n" + "=" * 60)
     print("EVAL SUMMARY")
     print("=" * 60)
@@ -272,8 +290,8 @@ def print_report(results: list[Result], stats: dict, elapsed: float, verbose: bo
     print()
     fp_ok = "PASS" if stats["fp_pass"] else "FAIL"
     fn_ok = "PASS" if stats["fn_pass"] else "FAIL"
-    print(f"Threshold FP (<{THRESHOLD_FP}%): {fp_ok} ({stats['fp_rate_pct']}%)")
-    print(f"Threshold FN (<{THRESHOLD_FN}%): {fn_ok} ({stats['fn_rate_pct']}%)")
+    print(f"Threshold FP (<{threshold_fp}%): {fp_ok} ({stats['fp_rate_pct']}%)")
+    print(f"Threshold FN (<{threshold_fn}%): {fn_ok} ({stats['fn_rate_pct']}%)")
 
     # Tier distribution
     print()
@@ -293,7 +311,7 @@ def print_report(results: list[Result], stats: dict, elapsed: float, verbose: bo
         print()
         for ds in datasets:
             ds_r = [r for r in results if r.dataset == ds]
-            ds_stats = compute_stats(ds_r)
+            ds_stats = compute_stats(ds_r, threshold_fp, threshold_fn)
             print(f"  {ds:16s}: {ds_stats['accuracy_pct']}% acc, FP={ds_stats['fp_rate_pct']}%, FN={ds_stats['fn_rate_pct']}%")
 
     # Failures
@@ -306,7 +324,15 @@ def print_report(results: list[Result], stats: dict, elapsed: float, verbose: bo
             print(f"  [{label}] {r.dataset}/{r.category}/{r.sample} -> {r.decision}")
 
 
-def write_results(results: list[Result], stats: dict, forced_tier: str | None, elapsed: float):
+def write_results(
+    results: list[Result],
+    stats: dict,
+    forced_tier: str | None,
+    elapsed: float,
+    threshold_fp: float,
+    threshold_fn: float,
+    threshold_noise: float,
+):
     results_dir = _EVAL / "results"
     results_dir.mkdir(exist_ok=True)
 
@@ -318,7 +344,7 @@ def write_results(results: list[Result], stats: dict, forced_tier: str | None, e
         "meta": {
             "timestamp": ts,
             "forced_tier": forced_tier,
-            "thresholds": {"fp": THRESHOLD_FP, "fn": THRESHOLD_FN, "noise": THRESHOLD_NOISE},
+            "thresholds": {"fp": threshold_fp, "fn": threshold_fn, "noise": threshold_noise},
             **{k: v for k, v in stats.items() if k != "tier_dist"},
         },
         "results": [asdict(r) for r in results],
@@ -410,6 +436,12 @@ def parse_args():
                     help="Enable multi-round deliberation (cross-checking between models)")
     p.add_argument("-v", "--verbose", action="store_true",
                     help="Verbose per-sample output")
+    p.add_argument("--max-fp", type=float, default=DEFAULT_THRESHOLD_FP,
+                    help="Fail if false-positive rate is >= this percentage")
+    p.add_argument("--max-fn", type=float, default=DEFAULT_THRESHOLD_FN,
+                    help="Fail if false-negative rate is >= this percentage")
+    p.add_argument("--max-noise", type=float, default=DEFAULT_THRESHOLD_NOISE,
+                    help="Reserved threshold for future noise metrics")
     return p.parse_args()
 
 
@@ -469,9 +501,9 @@ def main():
     elapsed = time.monotonic() - t0
 
     # Report
-    stats = compute_stats(results)
-    print_report(results, stats, elapsed, args.verbose)
-    write_results(results, stats, args.tier, elapsed)
+    stats = compute_stats(results, args.max_fp, args.max_fn)
+    print_report(results, stats, elapsed, args.verbose, args.max_fp, args.max_fn)
+    write_results(results, stats, args.tier, elapsed, args.max_fp, args.max_fn, args.max_noise)
 
     # Exit code
     passed = stats.get("fp_pass", False) and stats.get("fn_pass", False)
