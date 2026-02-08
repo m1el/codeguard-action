@@ -65,6 +65,53 @@ class TestAnalyzerAIDiffContent(unittest.TestCase):
         self.assertEqual(mock_review.call_count, 1)
         self.assertEqual(mock_review.call_args.args[0], self._RAW_DIFF)
 
+    def test_content_preview_redacted_when_ai_diff_provided(self):
+        """C2 regression: content_preview must not leak raw PII."""
+        analyzer = self._analyzer()
+
+        with patch.object(analyzer, "_run_multi_model_review") as mock_review:
+            mock_review.return_value = {
+                "reviews": [],
+                "models_used": 0,
+                "models_failed": 0,
+                "model_errors": [],
+                "consensus": {"consensus_risk": "comment", "agreement_score": 1.0},
+            }
+            result = analyzer.analyze(
+                self._RAW_DIFF,
+                tier_override="L1",
+                ai_diff_content=self._SANITIZED_DIFF,
+            )
+
+        zones = result["sensitive_zones"]
+        self.assertTrue(len(zones) > 0, "expected at least one sensitive zone")
+        for zone in zones:
+            self.assertEqual(zone["content_preview"], "[REDACTED]")
+            self.assertNotIn("alice@example.com", zone["content_preview"])
+
+    def test_content_preview_shows_raw_when_no_ai_diff(self):
+        """Without sanitized diff, content_preview uses the raw line."""
+        analyzer = self._analyzer()
+
+        with patch.object(analyzer, "_run_multi_model_review") as mock_review:
+            mock_review.return_value = {
+                "reviews": [],
+                "models_used": 0,
+                "models_failed": 0,
+                "model_errors": [],
+                "consensus": {"consensus_risk": "comment", "agreement_score": 1.0},
+            }
+            result = analyzer.analyze(self._RAW_DIFF, tier_override="L1")
+
+        zones = result["sensitive_zones"]
+        self.assertTrue(len(zones) > 0, "expected at least one sensitive zone")
+        # At least one zone should contain the raw email in its preview
+        previews = [z["content_preview"] for z in zones]
+        self.assertTrue(
+            any("alice@example.com" in p for p in previews),
+            f"expected raw PII in previews when ai_diff_content is None, got {previews}",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

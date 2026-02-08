@@ -215,6 +215,7 @@ def main():
         api_key=pii_shield_api_key,
         timeout_seconds=pii_shield_timeout,
         fail_closed=pii_shield_fail_closed,
+        salt_fingerprint=pii_shield_salt_fingerprint,
     )
 
     # Auto-merge
@@ -475,8 +476,9 @@ def main():
                 print(f"::error::PII-Shield failed while sanitizing PR comment: {exc}")
                 sys.exit(1)
             except Exception as exc:
-                print(f"::error::Unexpected PII-Shield comment sanitization error: {exc}")
-                sys.exit(1)
+                print(f"::warning::PII-Shield error in comment sanitization: {exc}")
+                if pii_shield_fail_closed:
+                    sys.exit(1)
         commenter.post_decision_card(comment_body)
         print("Decision Card posted")
         print("::endgroup::")
@@ -490,12 +492,16 @@ def main():
             analysis["sanitization"] = dict(sanitization_summary)
         bundle = generator.create_bundle(
             pr=pr,
-            diff_content=raw_diff_content,
             analysis=analysis,
             risk_result=risk_result,
             repository=github_repository,
             commit_sha=github_sha
         )
+
+        if sanitization_summary:
+            bundle["sanitization"] = dict(sanitization_summary)
+            if isinstance(bundle.get("analysis_snapshot"), dict):
+                bundle["analysis_snapshot"]["sanitization"] = dict(sanitization_summary)
 
         if pii_shield_enabled and pii_shield_sanitize_bundle:
             try:
@@ -517,13 +523,9 @@ def main():
                 print(f"::error::PII-Shield failed while sanitizing evidence bundle: {exc}")
                 sys.exit(1)
             except Exception as exc:
-                print(f"::error::Unexpected PII-Shield bundle sanitization error: {exc}")
-                sys.exit(1)
-
-        if sanitization_summary:
-            bundle["sanitization"] = dict(sanitization_summary)
-            if isinstance(bundle.get("analysis_snapshot"), dict):
-                bundle["analysis_snapshot"]["sanitization"] = dict(sanitization_summary)
+                print(f"::warning::PII-Shield error in bundle sanitization: {exc}")
+                if pii_shield_fail_closed:
+                    sys.exit(1)
 
         # Save bundle
         bundle_dir.mkdir(parents=True, exist_ok=True)
@@ -574,8 +576,9 @@ def main():
                 print(f"::error::PII-Shield failed while sanitizing SARIF output: {exc}")
                 sys.exit(1)
             except Exception as exc:
-                print(f"::error::Unexpected PII-Shield SARIF sanitization error: {exc}")
-                sys.exit(1)
+                print(f"::warning::PII-Shield error in SARIF sanitization: {exc}")
+                if pii_shield_fail_closed:
+                    sys.exit(1)
         sarif_path = Path(get_env("GITHUB_WORKSPACE", ".")) / "guardspine-results.sarif"
 
         with open(sarif_path, "w", encoding="utf-8", newline="\n") as f:

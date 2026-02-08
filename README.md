@@ -654,6 +654,52 @@ fi
 
 ---
 
+## PII-Shield Integration
+
+CodeGuard integrates [PII-Shield](https://github.com/aragossa/pii-shield) to prevent secrets and personally identifiable information from leaking into AI prompts, PR comments, and evidence bundles.
+
+### Why
+
+AI code review sends diff content to language models. Without sanitization, API keys, tokens, database credentials, and other secrets embedded in diffs would be forwarded to third-party AI providers. PII-Shield catches these using Shannon entropy analysis and bigram frequency detection, then replaces them with deterministic HMAC tokens (`[HIDDEN:<id>]`) so the same secret always maps to the same token within a bundle.
+
+### Where
+
+PII-Shield operates at three points in the CodeGuard pipeline:
+
+| Phase | What Gets Sanitized | File |
+|-------|---------------------|------|
+| **Pre-AI review** | Diff content sent to AI models | `src/pii_shield.py` |
+| **PR comment** | Diff Postcard content posted to GitHub | `entrypoint.py` |
+| **Bundle sealing** | Evidence bundle payload before hashing | `src/bundle_generator.py` |
+
+Raw diffs are preserved (never sanitized) for SHA-256 hash computation. Only the copies sent to AI models and external outputs are sanitized.
+
+### How
+
+Enable via environment variables or action inputs:
+
+```yaml
+- uses: DNYoussef/codeguard-action@v1
+  with:
+    github_token: ${{ secrets.GITHUB_TOKEN }}
+    pii_shield_enabled: true
+    pii_shield_endpoint: https://pii-shield.example/sanitize  # or omit for local mode
+    pii_shield_salt_fingerprint: sha256:your-org-salt-fingerprint
+  env:
+    PII_SHIELD_API_KEY: ${{ secrets.PII_SHIELD_API_KEY }}
+```
+
+| Input | Default | Description |
+|-------|---------|-------------|
+| `pii_shield_enabled` | `false` | Enable PII-Shield sanitization |
+| `pii_shield_endpoint` | `""` | Remote PII-Shield API URL (empty = local mode) |
+| `pii_shield_salt_fingerprint` | `sha256:00000000` | Non-secret fingerprint identifying the HMAC salt |
+| `pii_shield_fail_closed` | `true` | Fail the action if sanitization errors occur |
+
+**Hash field preservation**: GuardSpine's own SHA-256 hashes (which are high-entropy by design) are automatically excluded from entropy detection to avoid false positives. Fields ending in `_hash`, `_digest`, `_checksum`, `root_hash`, `chain_hash`, etc. are extracted before sanitization and reinjected after.
+
+---
+
 ## FAQ
 
 **Q: Does this replace code review?**

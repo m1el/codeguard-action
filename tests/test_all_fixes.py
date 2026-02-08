@@ -371,7 +371,7 @@ class TestBundleIntegrity(unittest.TestCase):
             "rationale": "High risk",
         }
         bundle = generator.create_bundle(
-            pr=pr, diff_content=SAMPLE_DIFF, analysis=analysis,
+            pr=pr, analysis=analysis,
             risk_result=risk_result, repository="test/repo", commit_sha="abc1234567890",
             attestation_key=attestation_key,
         )
@@ -594,7 +594,7 @@ class TestFullPipeline(unittest.TestCase):
 
         generator = BundleGenerator()
         bundle = generator.create_bundle(
-            pr=pr, diff_content=SAMPLE_DIFF, analysis=analysis,
+            pr=pr, analysis=analysis,
             risk_result=risk_result, repository="test/repo", commit_sha="abc1234567890"
         )
 

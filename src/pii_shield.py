@@ -10,11 +10,85 @@ Supports:
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
+import sys
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlparse
 
 import requests
+
+
+def _validate_endpoint(url: str) -> None:
+    """Block SSRF-prone endpoints (cloud metadata, private IPs)."""
+    parsed = urlparse(url)
+    if parsed.scheme not in ("https", "http"):
+        raise ValueError(f"PII-Shield endpoint must use http(s): {url}")
+    host = parsed.hostname or ""
+    if host in ("169.254.169.254", "metadata.google.internal"):
+        raise ValueError(f"PII-Shield endpoint cannot target cloud metadata: {url}")
+    try:
+        ip = ipaddress.ip_address(host)
+        if ip.is_private:
+            raise ValueError(f"PII-Shield endpoint cannot target private IP: {url}")
+    except ValueError as exc:
+        if "cannot target" in str(exc):
+            raise
+        # not an IP literal -- hostname is fine
+
+
+_HASH_FIELD_SUFFIXES = ("_hash",)
+_HASH_FIELD_EXACT = frozenset({
+    "signature_value", "public_key_id", "root_hash",
+    "chain_hash", "previous_hash", "final_hash",
+})
+
+
+def _is_hash_field(key: str) -> bool:
+    return any(key.endswith(s) for s in _HASH_FIELD_SUFFIXES) or key in _HASH_FIELD_EXACT
+
+
+def _extract_hash_fields(obj: Any, _prefix: str = "") -> dict[str, Any]:
+    """Recursively extract hash/signature fields, returning {dotted_path: value}."""
+    preserved: dict[str, Any] = {}
+    if isinstance(obj, dict):
+        for key in list(obj.keys()):
+            path = f"{_prefix}.{key}" if _prefix else key
+            if _is_hash_field(key) and isinstance(obj[key], str):
+                preserved[path] = obj.pop(key)
+            elif isinstance(obj[key], (dict, list)):
+                preserved.update(_extract_hash_fields(obj[key], path))
+    elif isinstance(obj, list):
+        for idx, item in enumerate(obj):
+            if isinstance(item, (dict, list)):
+                preserved.update(_extract_hash_fields(item, f"{_prefix}[{idx}]"))
+    return preserved
+
+
+def _reinject_hash_fields(obj: Any, preserved: dict[str, Any]) -> None:
+    """Re-inject previously extracted hash fields at their original paths."""
+    for path, value in preserved.items():
+        _set_by_path(obj, path, value)
+
+
+def _set_by_path(obj: Any, path: str, value: Any) -> None:
+    """Set a value in a nested dict/list by dotted path with [n] indices."""
+    parts: list[str] = []
+    for segment in path.replace("[", ".[").split("."):
+        if segment:
+            parts.append(segment)
+    cursor = obj
+    for part in parts[:-1]:
+        if part.startswith("[") and part.endswith("]"):
+            cursor = cursor[int(part[1:-1])]
+        else:
+            cursor = cursor[part]
+    last = parts[-1]
+    if last.startswith("[") and last.endswith("]"):
+        cursor[int(last[1:-1])] = value
+    else:
+        cursor[last] = value
 
 
 class PIIShieldError(RuntimeError):
@@ -80,6 +154,7 @@ class PIIShieldClient:
         api_key: str | None = None,
         timeout_seconds: float = 5.0,
         fail_closed: bool = False,
+        salt_fingerprint: str = "sha256:00000000",
     ):
         self.enabled = enabled
         self.mode = (mode or "auto").strip().lower()
@@ -87,6 +162,10 @@ class PIIShieldClient:
         self.api_key = api_key
         self.timeout_seconds = timeout_seconds
         self.fail_closed = fail_closed
+        self.salt_fingerprint = salt_fingerprint
+
+        if self.endpoint:
+            _validate_endpoint(self.endpoint)
 
         if self.mode not in self._VALID_MODES:
             raise ValueError(
@@ -184,6 +263,7 @@ class PIIShieldClient:
 
         if self.mode == "local":
             # Kept only for compatibility; no built-in detector is implemented.
+            print("::warning::PII-Shield local mode provides no PII detection. Configure a remote endpoint for actual protection.", file=sys.stderr)
             return PIIShieldResult(
                 sanitized_text=text,
                 changed=False,
@@ -226,9 +306,18 @@ class PIIShieldClient:
     ) -> tuple[Any, PIIShieldResult]:
         """
         Sanitize a JSON-like structure while preserving schema shape when possible.
+
+        Hash and signature fields are extracted before sanitization and
+        re-injected afterwards so that high-entropy cryptographic values
+        are never sent to the remote PII-Shield endpoint.
         """
+        import copy as _copy
+
+        work = _copy.deepcopy(document) if isinstance(document, (dict, list)) else document
+        preserved = _extract_hash_fields(work) if isinstance(work, (dict, list)) else {}
+
         original_json = json.dumps(
-            document,
+            work,
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
@@ -241,10 +330,14 @@ class PIIShieldClient:
             purpose=purpose,
         )
         if not result.changed:
-            return document, result
+            if preserved:
+                _reinject_hash_fields(work, preserved)
+            return work if preserved else document, result
 
         try:
             sanitized_document = json.loads(result.sanitized_text)
+            if preserved:
+                _reinject_hash_fields(sanitized_document, preserved)
             return sanitized_document, result
         except json.JSONDecodeError as exc:
             if self.fail_closed:
@@ -258,6 +351,8 @@ class PIIShieldClient:
                     "warning": f"sanitized {purpose} content was not valid JSON; fail-open passthrough",
                 },
             )
+            if preserved:
+                _reinject_hash_fields(document, preserved)
             return document, enriched
 
     def _sanitize_remote(
@@ -277,6 +372,7 @@ class PIIShieldClient:
             "deterministic": True,
             "preserve_line_numbers": True,
             "include_findings": include_findings,
+            "salt_fingerprint": self.salt_fingerprint,
         }
         if purpose:
             payload["purpose"] = purpose
@@ -305,6 +401,7 @@ class PIIShieldClient:
             redaction_count = sum(redactions_by_type.values())
             if redaction_count == 0 and isinstance(body.get("redactions"), list):
                 redaction_count = len(body["redactions"])
+        redaction_count = max(0, redaction_count)
 
         signals = self._extract_signals(body, redactions_by_type)
 
@@ -361,11 +458,12 @@ class PIIShieldClient:
         normalized = (label or "").strip().lower().replace("-", "_").replace(" ", "_")
         if not normalized:
             return None
-        if any(k in normalized for k in ("email", "phone", "ssn", "pii", "phi", "personal")):
+        parts = set(normalized.split("_"))
+        if any(k in parts for k in ("email", "phone", "ssn", "pii", "phi", "personal")):
             return "pii"
-        if any(k in normalized for k in ("card", "pan", "payment", "billing")):
+        if any(k in parts for k in ("card", "pan", "payment", "billing")):
             return "payment"
-        if any(k in normalized for k in ("secret", "token", "credential", "password", "api_key", "key", "entropy")):
+        if any(k in parts for k in ("secret", "token", "credential", "password", "key", "entropy")):
             return "entropy_secret"
         return None
 

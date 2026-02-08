@@ -327,11 +327,18 @@ class DiffAnalyzer:
                     if line.is_added:
                         for zone_name, pattern in self.SENSITIVE_PATTERNS.items():
                             if re.search(pattern, line.value, re.IGNORECASE):
+                                # When a sanitized diff is available, redact
+                                # the preview to avoid leaking raw PII.
+                                preview = (
+                                    "[REDACTED]"
+                                    if ai_diff_content is not None
+                                    else line.value[:100].strip()
+                                )
                                 sensitive_zones.append({
                                     "zone": zone_name,
                                     "file": patched_file.path,
                                     "line": line_data["line_number"],
-                                    "content_preview": line.value[:100].strip()
+                                    "content_preview": preview
                                 })
 
                 file_change.hunks.append(hunk_data)

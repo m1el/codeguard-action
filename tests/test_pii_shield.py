@@ -13,6 +13,63 @@ sys.path.insert(0, str(ROOT / "src"))
 from pii_shield import PIIShieldClient, PIIShieldError
 
 
+class TestEndpointValidation(unittest.TestCase):
+    """H7: SSRF prevention via URL validation on pii_shield_endpoint."""
+
+    def test_rejects_cloud_metadata_ip(self):
+        with self.assertRaises(ValueError, msg="cloud metadata"):
+            PIIShieldClient(
+                enabled=True, mode="remote",
+                endpoint="http://169.254.169.254/latest/meta-data/",
+            )
+
+    def test_rejects_google_metadata_host(self):
+        with self.assertRaises(ValueError, msg="cloud metadata"):
+            PIIShieldClient(
+                enabled=True, mode="remote",
+                endpoint="http://metadata.google.internal/computeMetadata/v1/",
+            )
+
+    def test_rejects_private_ip(self):
+        with self.assertRaises(ValueError, msg="private IP"):
+            PIIShieldClient(
+                enabled=True, mode="remote",
+                endpoint="http://10.0.0.1/shield",
+            )
+
+    def test_rejects_192_168_private_ip(self):
+        with self.assertRaises(ValueError, msg="private IP"):
+            PIIShieldClient(
+                enabled=True, mode="remote",
+                endpoint="http://192.168.1.1/shield",
+            )
+
+    def test_rejects_non_http_scheme(self):
+        with self.assertRaises(ValueError, msg="http(s)"):
+            PIIShieldClient(
+                enabled=True, mode="remote",
+                endpoint="ftp://shield.example.com/api",
+            )
+
+    def test_allows_valid_https_endpoint(self):
+        client = PIIShieldClient(
+            enabled=True, mode="remote",
+            endpoint="https://shield.example.com/api/sanitize",
+        )
+        self.assertEqual(client.endpoint, "https://shield.example.com/api/sanitize")
+
+    def test_allows_hostname_not_ip(self):
+        client = PIIShieldClient(
+            enabled=True, mode="remote",
+            endpoint="http://pii-shield.internal.corp:8080/v1",
+        )
+        self.assertEqual(client.endpoint, "http://pii-shield.internal.corp:8080/v1")
+
+    def test_none_endpoint_skips_validation(self):
+        client = PIIShieldClient(enabled=True, mode="auto", endpoint=None)
+        self.assertIsNone(client.endpoint)
+
+
 class TestPIIShieldModes(unittest.TestCase):
     def test_disabled_mode_passthrough(self):
         text = "secret = 'abc123'\n"
@@ -205,6 +262,112 @@ class TestPIIShieldJsonSanitization(unittest.TestCase):
 
         with self.assertRaises(PIIShieldError):
             client.sanitize_json_document({"token": "secret"}, purpose="bundle")
+
+
+class TestHashFieldPreservation(unittest.TestCase):
+    """C1 regression: hash/signature fields must survive PII-Shield sanitization."""
+
+    @patch("pii_shield.requests.post")
+    def test_hash_fields_preserved_after_sanitization(self, mock_post):
+        """Hash fields should be extracted before remote call and reinjected after."""
+        bundle = {
+            "chain_hash": "sha256:aabbccdd" + "ee" * 28,
+            "content_hash": "sha256:11223344" + "55" * 28,
+            "root_hash": "sha256:deadbeef" + "00" * 28,
+            "signature_value": "base64:MEUCIQC" + "A" * 80,
+            "public_key_id": "key-2026-02-07",
+            "previous_hash": "sha256:cafebabe" + "ff" * 28,
+            "final_hash": "sha256:f1f2f3f4" + "ab" * 28,
+            "message": "contact alice@example.com for details",
+            "nested": {
+                "inner_hash": "sha256:nested00" + "11" * 28,
+                "description": "call 555-0100",
+            },
+        }
+
+        # Simulate remote endpoint redacting high-entropy + PII strings
+        def fake_post(url, json=None, headers=None, timeout=None):
+            text = json["text"]
+            # Redact anything that looks like a hash or PII
+            import re
+            redacted = re.sub(r"sha256:[0-9a-f]{64}", "[REDACTED:hash]", text)
+            redacted = re.sub(r"base64:\S+", "[REDACTED:entropy]", redacted)
+            redacted = re.sub(r"key-\S+", "[REDACTED:key]", redacted)
+            redacted = redacted.replace("alice@example.com", "[REDACTED:email]")
+            redacted = redacted.replace("555-0100", "[REDACTED:phone]")
+
+            resp = Mock()
+            resp.status_code = 200
+            resp.raise_for_status.return_value = None
+            resp.json.return_value = {
+                "provider": "pii-shield-remote",
+                "sanitized_text": redacted,
+                "redaction_count": 2,
+                "redactions_by_type": {"email": 1, "phone": 1},
+            }
+            return resp
+
+        mock_post.side_effect = fake_post
+
+        client = PIIShieldClient(
+            enabled=True,
+            mode="remote",
+            endpoint="https://shield.example/api/sanitize",
+        )
+
+        sanitized, result = client.sanitize_json_document(bundle, purpose="bundle")
+
+        # Hash fields must be intact
+        self.assertEqual(sanitized["chain_hash"], bundle["chain_hash"])
+        self.assertEqual(sanitized["content_hash"], bundle["content_hash"])
+        self.assertEqual(sanitized["root_hash"], bundle["root_hash"])
+        self.assertEqual(sanitized["signature_value"], bundle["signature_value"])
+        self.assertEqual(sanitized["public_key_id"], bundle["public_key_id"])
+        self.assertEqual(sanitized["previous_hash"], bundle["previous_hash"])
+        self.assertEqual(sanitized["final_hash"], bundle["final_hash"])
+        self.assertEqual(sanitized["nested"]["inner_hash"], bundle["nested"]["inner_hash"])
+
+        # PII fields should still be redacted
+        self.assertNotEqual(sanitized["message"], bundle["message"])
+        self.assertIn("REDACTED", sanitized["message"])
+
+    @patch("pii_shield.requests.post")
+    def test_hash_fields_not_sent_to_remote(self, mock_post):
+        """The JSON sent to the remote endpoint must NOT contain hash field values."""
+        bundle = {
+            "chain_hash": "sha256:aabbccdd" + "ee" * 28,
+            "message": "hello world",
+        }
+
+        captured_payload = {}
+
+        def capture_post(url, json=None, headers=None, timeout=None):
+            captured_payload["text"] = json["text"]
+            resp = Mock()
+            resp.status_code = 200
+            resp.raise_for_status.return_value = None
+            resp.json.return_value = {
+                "provider": "pii-shield-remote",
+                "sanitized_text": json["text"],  # no changes
+                "redaction_count": 0,
+                "redactions_by_type": {},
+            }
+            return resp
+
+        mock_post.side_effect = capture_post
+
+        client = PIIShieldClient(
+            enabled=True,
+            mode="remote",
+            endpoint="https://shield.example/api/sanitize",
+        )
+
+        sanitized, _ = client.sanitize_json_document(bundle, purpose="bundle")
+
+        # The hash value must NOT appear in the payload sent to remote
+        self.assertNotIn("aabbccdd", captured_payload["text"])
+        # But it must be present in the returned document
+        self.assertEqual(sanitized["chain_hash"], bundle["chain_hash"])
 
 
 if __name__ == "__main__":

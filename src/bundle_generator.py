@@ -65,7 +65,6 @@ class BundleGenerator:
     def create_bundle(
         self,
         pr: PullRequest,
-        diff_content: str,
         analysis: dict[str, Any],
         risk_result: dict[str, Any],
         repository: str,
@@ -79,7 +78,6 @@ class BundleGenerator:
 
         Args:
             pr: GitHub PullRequest object
-            diff_content: Raw diff content
             analysis: Analysis results from DiffAnalyzer
             risk_result: Classification from RiskClassifier
             repository: Repository name (owner/repo)
