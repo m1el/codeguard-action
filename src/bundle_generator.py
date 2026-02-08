@@ -5,14 +5,19 @@ Primary output follows guardspine-spec v0.2.0. Legacy v1-style fields are
 retained for backward compatibility with existing consumers/tests.
 """
 
+from __future__ import annotations
+
 import hashlib
 import uuid
 from base64 import b64encode
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Optional, TYPE_CHECKING
 from dataclasses import dataclass, field
 
 from github.PullRequest import PullRequest
+
+if TYPE_CHECKING:
+    from .analyzer import AnalysisResult
 
 try:
     from .canonical_json import canonical_json_dumps
@@ -65,7 +70,7 @@ class BundleGenerator:
     def create_bundle(
         self,
         pr: PullRequest,
-        analysis: dict[str, Any],
+        analysis: AnalysisResult | dict[str, Any],
         risk_result: dict[str, Any],
         repository: str,
         commit_sha: str,

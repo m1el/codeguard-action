@@ -13,7 +13,7 @@ import re
 import json
 import concurrent.futures
 from typing import Any, Optional
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields as dataclass_fields
 from unidiff import PatchSet
 
 
@@ -52,6 +52,67 @@ class MultiModelConsensus:
     combined_concerns: list[str]
     rubric_summary: dict[str, float]  # rubric_id -> average score
     dissenting_opinions: list[str]
+
+
+@dataclass
+class AnalysisResult:
+    """Structured result from DiffAnalyzer.analyze().
+
+    Supports dict-style access (``result["key"]``, ``result.get("key")``)
+    for backward compatibility with code that treats the analysis as a plain
+    dict.  New code should prefer attribute access.
+    """
+
+    # Core metrics (always set)
+    files_changed: int = 0
+    lines_added: int = 0
+    lines_removed: int = 0
+    files: list = field(default_factory=list)
+    sensitive_zones: list = field(default_factory=list)
+    diff_hash: str = ""
+    preliminary_tier: str = "L2"
+    parse_error: bool = False
+
+    # Multi-model review (set when AI review runs)
+    multi_model_review: dict = field(default_factory=dict)
+    models_used: int = 0
+    models_failed: int = 0
+    model_errors: list = field(default_factory=list)
+    consensus_risk: str = ""
+    agreement_score: float = 0.0
+    ai_summary: dict = field(default_factory=dict)
+
+    # PII-Shield enrichment (set by entrypoint)
+    raw_diff_hash: str = ""
+    ai_diff_hash: str = ""
+    pii_shield: dict = field(default_factory=lambda: {"enabled": False})
+    sanitization: Optional[dict] = None
+
+    # -- dict-compatible interface for backward compatibility ---------------
+
+    def __getitem__(self, key: str) -> Any:
+        try:
+            return getattr(self, key)
+        except AttributeError:
+            raise KeyError(key)
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        setattr(self, key, value)
+
+    def __contains__(self, key: str) -> bool:
+        return hasattr(self, key)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return getattr(self, key, default)
+
+    def keys(self):
+        return [f.name for f in dataclass_fields(self)]
+
+    def values(self):
+        return [getattr(self, f.name) for f in dataclass_fields(self)]
+
+    def items(self):
+        return [(f.name, getattr(self, f.name)) for f in dataclass_fields(self)]
 
 
 class DiffAnalyzer:
@@ -261,7 +322,7 @@ class DiffAnalyzer:
         tier_override: str = None,
         deliberate: bool = False,
         ai_diff_content: str | None = None,
-    ) -> dict[str, Any]:
+    ) -> AnalysisResult:
         """
         Analyze a diff with tier-based multi-model review.
 
@@ -358,15 +419,15 @@ class DiffAnalyzer:
         # Estimate preliminary tier based on file patterns and sensitive zones
         preliminary_tier = self._estimate_preliminary_tier(files, sensitive_zones, total_added + total_removed)
 
-        result = {
-            "files_changed": len(files),
-            "lines_added": total_added,
-            "lines_removed": total_removed,
-            "files": files,
-            "sensitive_zones": sensitive_zones,
-            "diff_hash": self._hash_diff(diff_content),
-            "preliminary_tier": preliminary_tier,
-        }
+        result = AnalysisResult(
+            files_changed=len(files),
+            lines_added=total_added,
+            lines_removed=total_removed,
+            files=files,
+            sensitive_zones=sensitive_zones,
+            diff_hash=self._hash_diff(diff_content),
+            preliminary_tier=preliminary_tier,
+        )
 
         # Apply tier override if provided (e.g., from eval harness)
         effective_tier = tier_override or preliminary_tier
@@ -384,35 +445,35 @@ class DiffAnalyzer:
                 multi_review = self._run_multi_model_review(
                     model_diff_content, sensitive_zones, rubric, models_needed, use_rubric
                 )
-            result["multi_model_review"] = multi_review
+            result.multi_model_review = multi_review
 
             # Extract top-level outputs for entrypoint.py and eval harness
-            result["models_used"] = multi_review.get("models_used", 0)
-            result["models_failed"] = multi_review.get("models_failed", 0)
-            result["model_errors"] = multi_review.get("model_errors", [])
+            result.models_used = multi_review.get("models_used", 0)
+            result.models_failed = multi_review.get("models_failed", 0)
+            result.model_errors = multi_review.get("model_errors", [])
             consensus = multi_review.get("consensus") or {}
-            result["consensus_risk"] = consensus.get("consensus_risk") or ""
-            result["agreement_score"] = consensus.get("agreement_score") or 0.0
+            result.consensus_risk = consensus.get("consensus_risk") or ""
+            result.agreement_score = consensus.get("agreement_score") or 0.0
 
             # Legacy compatibility: also include ai_summary from first model
             successful = [r for r in multi_review.get("reviews", []) if not r.get("error")]
             if successful:
                 first_review = successful[0]
-                result["ai_summary"] = {
+                result.ai_summary = {
                     "summary": first_review.get("summary", ""),
                     "intent": first_review.get("intent", ""),
                     "concerns": first_review.get("concerns", []),
                 }
         else:
-            result["multi_model_review"] = {
+            result.multi_model_review = {
                 "reviews": [],
                 "models_used": 0,
                 "tier": preliminary_tier,
                 "reason": "L0 tier - rules-based only" if preliminary_tier == "L0" else "No AI providers configured"
             }
-            result["models_used"] = 0
-            result["consensus_risk"] = ""
-            result["agreement_score"] = 0.0
+            result.models_used = 0
+            result.consensus_risk = ""
+            result.agreement_score = 0.0
 
         return result
 
@@ -943,21 +1004,19 @@ IMPORTANT: If the code follows security best practices, respond with "approve" a
             "total_models": len(valid_reviews),
         }
 
-    def _fallback_analysis(self, diff_content: str) -> dict[str, Any]:
+    def _fallback_analysis(self, diff_content: str) -> AnalysisResult:
         """Fallback analysis when unidiff parsing fails."""
         lines = diff_content.split("\n")
         added = sum(1 for l in lines if l.startswith("+") and not l.startswith("+++"))
         removed = sum(1 for l in lines if l.startswith("-") and not l.startswith("---"))
 
-        return {
-            "files_changed": diff_content.count("diff --git"),
-            "lines_added": added,
-            "lines_removed": removed,
-            "files": [],
-            "sensitive_zones": [],
-            "diff_hash": self._hash_diff(diff_content),
-            "parse_error": True
-        }
+        return AnalysisResult(
+            files_changed=diff_content.count("diff --git"),
+            lines_added=added,
+            lines_removed=removed,
+            diff_hash=self._hash_diff(diff_content),
+            parse_error=True,
+        )
 
     def _hash_diff(self, diff_content: str) -> str:
         """Generate SHA-256 hash of diff content."""

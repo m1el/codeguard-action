@@ -2,14 +2,19 @@
 Risk Classifier - Assigns risk tiers (L0-L4) based on analysis.
 """
 
+from __future__ import annotations
+
 import re
 import copy
 import fnmatch
 from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
 from dataclasses import dataclass
 
 import yaml
+
+if TYPE_CHECKING:
+    from .analyzer import AnalysisResult
 
 @dataclass
 class Finding:
@@ -413,7 +418,7 @@ class RiskClassifier:
         """Downgrade severity by one level."""
         return {"critical": "high", "high": "medium", "medium": "low", "low": "info"}.get(severity, severity)
 
-    def classify(self, analysis: dict[str, Any]) -> dict[str, Any]:
+    def classify(self, analysis: AnalysisResult | dict[str, Any]) -> dict[str, Any]:
         """
         Classify risk based on analysis results.
 
