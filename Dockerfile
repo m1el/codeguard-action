@@ -16,15 +16,11 @@ WORKDIR /action
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Create non-root runtime user
-RUN useradd --uid 10001 --create-home --shell /usr/sbin/nologin app
-
 # Copy action code
 COPY src/ ./src/
 COPY rubrics/ ./rubrics/
 COPY entrypoint.py .
-RUN chown -R app:app /action
-USER app
+# Decision engine profiles are inside src/decision_profiles/ (copied with src/)
 
 # Set entrypoint
 ENTRYPOINT ["python", "/action/entrypoint.py"]

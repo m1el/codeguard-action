@@ -23,8 +23,7 @@ from src.pr_commenter import PRCommenter
 from src.sarif_exporter import SARIFExporter
 from src.pii_shield import PIIShieldClient, PIIShieldError
 
-from code_guard.audit import Finding as AuditFinding
-from decision.engine import DecisionEngine, render_decision_card
+from src.decision_engine import Finding as AuditFinding, DecisionEngine, render_decision_card
 
 
 def get_env(name: str, default: str = "") -> str:
@@ -283,8 +282,11 @@ def main():
     # Get PR number
     pr_number = event.get("pull_request", {}).get("number")
     if not pr_number:
-        print("::notice::Not a pull request event, skipping analysis")
-        sys.exit(0)
+        if os.environ.get("STUB_DIFF_PATH"):
+            pr_number = event.get("number", 1)
+        else:
+            print("::notice::Not a pull request event, skipping analysis")
+            sys.exit(0)
 
     print(f"::group::GuardSpine CodeGuard Analysis")
     print(f"Repository: {github_repository}")

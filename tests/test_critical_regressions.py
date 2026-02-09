@@ -26,7 +26,7 @@ from src.analyzer import DiffAnalyzer
 from src.bundle_generator import BundleGenerator
 from src.risk_classifier import RiskClassifier
 from entrypoint import _map_findings, fetch_pr_diff, main, set_output
-from decision.engine import DecisionEngine
+from src.decision_engine import DecisionEngine
 
 
 class TestRubricSchemaCompatibility(unittest.TestCase):
@@ -193,13 +193,12 @@ class TestRuntimeSecurityRegressions(unittest.TestCase):
         )
         self.assertEqual(signature["algorithm"], "hmac-sha256")
 
-    def test_requirements_pin_guardspine_product_immutably(self):
+    def test_decision_engine_vendored_not_external(self):
         requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
-        bad = "guardspine-product @ git+https://github.com/DNYoussef/guardspine-product.git@main"
         self.assertNotIn(
-            bad,
+            "guardspine-product",
             requirements,
-            "Dependency must be pinned to immutable tag/commit, never @main",
+            "Decision engine is vendored in src/decision_engine.py, not an external dependency",
         )
 
     def test_set_output_uses_multiline_safe_format(self):

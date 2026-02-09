@@ -31,8 +31,7 @@ sys.path.insert(0, str(_ROOT))
 
 from src.analyzer import DiffAnalyzer
 from src.risk_classifier import RiskClassifier
-from code_guard.audit import Finding as AuditFinding
-from decision.engine import DecisionEngine, render_decision_card
+from src.decision_engine import Finding as AuditFinding, DecisionEngine, render_decision_card
 
 # Thresholds (overridable for CI profiles)
 DEFAULT_THRESHOLD_FP = float(os.environ.get("CODEGUARD_EVAL_MAX_FP", "5.0"))

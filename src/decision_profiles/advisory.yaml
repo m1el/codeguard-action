@@ -1,0 +1,11 @@
+# Advisory policy: never auto-block. Everything is informational.
+# Use this when ramping up trust in the system.
+name: advisory
+
+hard_block_rules: []
+
+condition_rules:
+  - severity: critical
+  - severity: high
+
+max_conditions: 2

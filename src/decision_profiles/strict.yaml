@@ -1,0 +1,16 @@
+# Strict policy: block on any critical (provable or not).
+# High-severity provable findings also block.
+name: strict
+
+hard_block_rules:
+  - severity: critical
+  - severity: high
+    provable_only: true
+
+condition_rules:
+  - severity: high
+    provable_only: false
+  - severity: medium
+    provable_only: true
+
+max_conditions: 2
