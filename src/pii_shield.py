@@ -181,6 +181,7 @@ class PIIShieldClient:
         timeout_seconds: float = 5.0,
         fail_closed: bool = False,
         salt_fingerprint: str = "sha256:00000000",
+        safe_regex_list: str | None = None,
     ):
         self.enabled = enabled
         self.mode = (mode or "auto").strip().lower()
@@ -189,6 +190,9 @@ class PIIShieldClient:
         self.timeout_seconds = timeout_seconds
         self.fail_closed = fail_closed
         self.salt_fingerprint = salt_fingerprint
+        # PII-Shield v1.2.0+: JSON array of {"pattern": ..., "name": ...} objects
+        # that bypass entropy detection entirely (replaces entropy threshold tuning)
+        self.safe_regex_list = safe_regex_list
 
         if self.endpoint:
             _validate_endpoint(self.endpoint)
@@ -409,6 +413,13 @@ class PIIShieldClient:
             "include_findings": include_findings,
             "salt_fingerprint": self.salt_fingerprint,
         }
+        if self.safe_regex_list:
+            try:
+                parsed = json.loads(self.safe_regex_list)
+                if isinstance(parsed, list):
+                    payload["safe_regex_list"] = parsed
+            except (json.JSONDecodeError, TypeError):
+                pass  # Invalid JSON -- skip, PII-Shield will use its own defaults
         if purpose:
             payload["purpose"] = purpose
 

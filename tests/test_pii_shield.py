@@ -370,5 +370,111 @@ class TestHashFieldPreservation(unittest.TestCase):
         self.assertEqual(sanitized["chain_hash"], bundle["chain_hash"])
 
 
+class TestSafeRegexList(unittest.TestCase):
+    """PII-Shield v1.2.0 safe_regex_list whitelist support."""
+
+    @patch("pii_shield.requests.post")
+    def test_safe_regex_list_forwarded_in_payload(self, mock_post):
+        """safe_regex_list JSON is included in remote request payload."""
+        captured = {}
+
+        def capture_post(url, json=None, headers=None, timeout=None):
+            captured["payload"] = json
+            resp = Mock()
+            resp.status_code = 200
+            resp.raise_for_status.return_value = None
+            resp.json.return_value = {
+                "provider": "pii-shield-remote",
+                "sanitized_text": json["text"],
+                "redaction_count": 0,
+                "redactions_by_type": {},
+            }
+            return resp
+
+        mock_post.side_effect = capture_post
+
+        regex_json = '[{"pattern": "^[a-f0-9]{40,64}$", "name": "SafeGitSHA"}]'
+        client = PIIShieldClient(
+            enabled=True,
+            mode="remote",
+            endpoint="https://shield.example/api/sanitize",
+            safe_regex_list=regex_json,
+        )
+        client.sanitize_text("sha256:aabbccdd" + "ee" * 28)
+
+        self.assertIn("safe_regex_list", captured["payload"])
+        self.assertEqual(len(captured["payload"]["safe_regex_list"]), 1)
+        self.assertEqual(captured["payload"]["safe_regex_list"][0]["name"], "SafeGitSHA")
+
+    @patch("pii_shield.requests.post")
+    def test_safe_regex_list_omitted_when_none(self, mock_post):
+        """No safe_regex_list in payload when not configured."""
+        captured = {}
+
+        def capture_post(url, json=None, headers=None, timeout=None):
+            captured["payload"] = json
+            resp = Mock()
+            resp.status_code = 200
+            resp.raise_for_status.return_value = None
+            resp.json.return_value = {
+                "provider": "pii-shield-remote",
+                "sanitized_text": json["text"],
+                "redaction_count": 0,
+                "redactions_by_type": {},
+            }
+            return resp
+
+        mock_post.side_effect = capture_post
+
+        client = PIIShieldClient(
+            enabled=True,
+            mode="remote",
+            endpoint="https://shield.example/api/sanitize",
+        )
+        client.sanitize_text("hello world")
+
+        self.assertNotIn("safe_regex_list", captured["payload"])
+
+    @patch("pii_shield.requests.post")
+    def test_safe_regex_list_invalid_json_ignored(self, mock_post):
+        """Invalid JSON in safe_regex_list is silently ignored."""
+        captured = {}
+
+        def capture_post(url, json=None, headers=None, timeout=None):
+            captured["payload"] = json
+            resp = Mock()
+            resp.status_code = 200
+            resp.raise_for_status.return_value = None
+            resp.json.return_value = {
+                "provider": "pii-shield-remote",
+                "sanitized_text": json["text"],
+                "redaction_count": 0,
+                "redactions_by_type": {},
+            }
+            return resp
+
+        mock_post.side_effect = capture_post
+
+        client = PIIShieldClient(
+            enabled=True,
+            mode="remote",
+            endpoint="https://shield.example/api/sanitize",
+            safe_regex_list="not valid json {{",
+        )
+        client.sanitize_text("hello world")
+
+        self.assertNotIn("safe_regex_list", captured["payload"])
+
+    def test_safe_regex_list_env_var_set(self):
+        """PII_SAFE_REGEX_LIST env var should be readable after client init."""
+        import os
+        regex_json = '[{"pattern": "_hash$", "name": "HashFieldSuffix"}]'
+        os.environ["PII_SAFE_REGEX_LIST"] = regex_json
+        try:
+            self.assertEqual(os.environ["PII_SAFE_REGEX_LIST"], regex_json)
+        finally:
+            del os.environ["PII_SAFE_REGEX_LIST"]
+
+
 if __name__ == "__main__":
     unittest.main()

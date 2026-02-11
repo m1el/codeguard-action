@@ -94,6 +94,10 @@ inputs:
     description: 'Non-secret salt fingerprint for deterministic redaction attestations (sha256:XXXXXXXX)'
     required: false
     default: 'sha256:00000000'
+  pii_safe_regex_list:
+    description: 'JSON array of regex patterns that bypass PII-Shield entropy detection (e.g., [{"pattern": "^[a-f0-9]{40,64}$", "name": "SafeGitSHA"}])'
+    required: false
+    default: '[{"pattern": "^[a-f0-9]{40,64}$", "name": "SafeGitSHA"}, {"pattern": "_hash$", "name": "HashFieldSuffix"}]'
   pii_shield_sanitize_comments:
     description: 'Sanitize PR comments with PII-Shield before publishing'
     required: false
