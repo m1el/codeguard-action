@@ -787,6 +787,23 @@ CodeGuard solves this by automatically extracting hash fields before sanitizatio
 
 This means PII-Shield focuses on actual secrets in content fields while leaving the cryptographic structure intact.
 
+### Custom Regex Whitelist (PII_SAFE_REGEX_LIST)
+
+For patterns that PII-Shield's entropy detector shouldn't flag (e.g., base64-encoded config values, JWT tokens in test fixtures), you can pass a custom regex whitelist:
+
+```yaml
+- uses: DNYoussef/codeguard-action@v1
+  with:
+    pii_shield_enabled: true
+    pii_safe_regex_list: 'eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+,GUARDSPINE_[A-Z_]+'
+```
+
+| Input | Default | Description |
+|-------|---------|-------------|
+| `pii_safe_regex_list` | `""` | Comma-separated regex patterns to whitelist from PII detection |
+
+Each pattern is compiled as a Python regex. Strings matching any pattern are passed through without redaction. Use this sparingly -- the default hash field preservation handles the common case.
+
 ### The PII_SALT Must Be Org-Wide
 
 The HMAC salt used by PII-Shield **must be the same across all services** in your organization that produce or consume GuardSpine bundles. If codeguard-action, rlm-docsync, and adapter-webhook each use a different salt, the same secret will produce different `[HIDDEN:...]` tokens in each system -- breaking cross-bundle correlation and audit trail consistency.
@@ -807,6 +824,18 @@ PII-Shield is integrated across the entire GuardSpine stack:
 | **guardspine-spec** | Defines the sanitization attestation schema (v0.2.1) | Active |
 
 All components produce a standardized `sanitization` attestation block (GuardSpine spec v0.2.1) documenting the engine, method, redaction count, and token format. The verifier checks this attestation for consistency.
+
+---
+
+## Recent Hardening
+
+Security audit fixes applied in Feb 2026:
+
+- **Canonicalization alignment**: `canonical_json.py` now matches the TS kernel exactly (no NFC normalization, no trailing newlines). Cross-language parity tests pass.
+- **SSRF hardening**: all outbound HTTP calls (PII-Shield, AI providers, webhook endpoints) validate URL schemes and reject private/internal IP ranges.
+- **Deterministic bundle IDs**: bundle IDs are now derived from content hash instead of random UUIDs, making bundles reproducible.
+- **Incremental root hash**: root hash computation uses streaming SHA-256 instead of string concatenation.
+- **Decision engine vendored**: the risk classification engine is vendored inline (no external dependency at runtime).
 
 ---
 
