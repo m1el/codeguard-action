@@ -170,7 +170,7 @@ class DiffAnalyzer:
     DEFAULT_MODELS = {
         # OpenRouter models (recommended - single API for multiple providers)
         "openrouter": [
-            "anthropic/claude-4.5-sonnet",
+            "anthropic/claude-sonnet-4.5",
             "openai/gpt-5.2",
             "google/gemini-2.5-flash",
         ],

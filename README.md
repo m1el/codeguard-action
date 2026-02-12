@@ -232,7 +232,7 @@ Configure **any combination** of models - same provider or mixed:
 ├─────────────────────────────────────────────────────────────────────────┤
 │                                                                          │
 │  Option 1: All OpenRouter (recommended - single API)                     │
-│    model_1: anthropic/claude-4.5-sonnet                                  │
+│    model_1: anthropic/claude-sonnet-4.5                                  │
 │    model_2: openai/gpt-5.2                                               │
 │    model_3: google/gemini-3-flash                                        │
 │                                                                          │
@@ -385,7 +385,7 @@ Configure up to 3 AI models for tier-based review. Models are used based on risk
   with:
     github_token: ${{ secrets.GITHUB_TOKEN }}
     openrouter_api_key: ${{ secrets.OPENROUTER_API_KEY }}
-    model_1: anthropic/claude-4.5-sonnet   # Used for L1+
+    model_1: anthropic/claude-sonnet-4.5   # Used for L1+
     model_2: openai/gpt-5.2                 # Used for L2+
     model_3: google/gemini-3-flash          # Used for L3+
 ```
@@ -393,7 +393,7 @@ Configure up to 3 AI models for tier-based review. Models are used based on risk
 **Popular OpenRouter models (Jan 2026):**
 | Model | ID | Best For |
 |-------|-----|----------|
-| Claude 4.5 Sonnet | `anthropic/claude-4.5-sonnet` | Fast + quality (default) |
+| Claude 4.5 Sonnet | `anthropic/claude-sonnet-4.5` | Fast + quality (default) |
 | Claude 4.5 Opus | `anthropic/claude-4.5-opus` | Best reasoning |
 | GPT 5.2 | `openai/gpt-5.2` | Good balance |
 | Gemini 3 Flash | `google/gemini-3-flash` | Fast, multimodal |

@@ -359,6 +359,15 @@ def main():
         model_3=model_3,
         ai_review=ai_review,
     )
+    # Log AI configuration for diagnostics
+    print(f"AI review enabled: {ai_review}")
+    configured_models = getattr(analyzer, "models", [])
+    print(f"AI providers configured: {len(configured_models)}")
+    for provider, model in configured_models:
+        print(f"  - {provider}/{model}")
+    if not configured_models:
+        print("::warning::No AI providers configured (no API keys found)")
+
     analysis = analyzer.analyze(
         raw_diff_content,
         rubric=rubric,
@@ -382,6 +391,21 @@ def main():
     print(f"Files changed: {analysis['files_changed']}")
     print(f"Lines added: {analysis['lines_added']}")
     print(f"Lines removed: {analysis['lines_removed']}")
+
+    # Log AI review results
+    mmr = analysis.get("multi_model_review") or {}
+    models_used = mmr.get("models_used", 0)
+    models_failed = mmr.get("models_failed", 0)
+    model_errors = mmr.get("model_errors", [])
+    tier_from_analysis = analysis.get("preliminary_tier", "?")
+    print(f"Preliminary tier: {tier_from_analysis}")
+    print(f"AI models used: {models_used}, failed: {models_failed}")
+    if model_errors:
+        for err in model_errors:
+            print(f"::warning::AI model error: {err}")
+    reason = mmr.get("reason")
+    if reason:
+        print(f"AI review note: {reason}")
     print("::endgroup::")
 
     # Classify risk
