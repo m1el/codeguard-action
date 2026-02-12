@@ -34,9 +34,13 @@ SAMPLE_DIFF = (
     " print('hello')\n"
 )
 
-# A canned review response for mocking
+# Stub metadata returned alongside model text (simulates API model_id).
+_STUB_META = {"model_id": "test-model-v1"}
+
+# A canned review response for mocking.
+# Returns (text, metadata) tuple matching the _call_* contract.
 def _make_review(verdict="approve", confidence=0.90, concerns=None):
-    return json.dumps({
+    text = json.dumps({
         "summary": "Test change",
         "intent": "feature",
         "concerns": concerns or [],
@@ -44,11 +48,12 @@ def _make_review(verdict="approve", confidence=0.90, concerns=None):
         "confidence": confidence,
         "rubric_scores": {},
     })
+    return text, _STUB_META
 
 
 def _make_crosscheck_response(verdict="approve", confidence=0.90,
                                concerns=None, changed=False, reason=""):
-    return json.dumps({
+    text = json.dumps({
         "summary": "Cross-checked",
         "concerns": concerns or [],
         "risk_assessment": verdict,
@@ -56,6 +61,7 @@ def _make_crosscheck_response(verdict="approve", confidence=0.90,
         "verdict_changed": changed,
         "change_reason": reason,
     })
+    return text, _STUB_META
 
 
 class TestDeliberation(unittest.TestCase):
@@ -278,7 +284,7 @@ class TestDeliberation(unittest.TestCase):
         """Models sometimes return concerns as dicts instead of strings."""
         analyzer = self._make_analyzer(2)
         # Simulate model returning structured concern objects
-        review_with_dict_concerns = json.dumps({
+        review_with_dict_concerns = (json.dumps({
             "summary": "Test",
             "intent": "feature",
             "concerns": [
@@ -289,7 +295,7 @@ class TestDeliberation(unittest.TestCase):
             "risk_assessment": "request_changes",
             "confidence": 0.85,
             "rubric_scores": {},
-        })
+        }), _STUB_META)
 
         with patch.object(analyzer, "_call_openrouter",
                           return_value=review_with_dict_concerns):

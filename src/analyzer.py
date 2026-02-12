@@ -11,6 +11,7 @@ Architecture:
 
 import re
 import json
+import hashlib
 import concurrent.futures
 from typing import Any, Optional
 from dataclasses import dataclass, field, fields as dataclass_fields
@@ -669,6 +670,7 @@ class DiffAnalyzer:
         models' previous-round findings but NOT the current round's, so all
         models in a round can execute concurrently."""
         reviews: list[dict | None] = [None] * len(providers)
+        prompt_hashes: dict[int, str] = {}
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(providers)) as ex:
             future_to_idx = {}
             for i, (provider, model) in enumerate(providers):
@@ -676,6 +678,7 @@ class DiffAnalyzer:
                 others = [r for j, r in enumerate(prev_reviews) if j != i]
                 prompt = self._build_crosscheck_prompt(
                     diff_content, own, others, round_num)
+                prompt_hashes[i] = f"sha256:{hashlib.sha256(prompt.encode('utf-8')).hexdigest()}"
                 future_to_idx[ex.submit(
                     self._call_provider, provider, model, prompt
                 )] = (i, provider, model)
@@ -683,15 +686,20 @@ class DiffAnalyzer:
             for future in concurrent.futures.as_completed(future_to_idx):
                 idx, provider, model = future_to_idx[future]
                 try:
-                    raw = future.result()
+                    raw, meta = future.result()
                     parsed = self._parse_review_response(raw)
                     parsed["model_name"] = model
                     parsed["provider"] = provider
+                    parsed["model_id"] = meta.get("model_id", model)
+                    parsed["prompt_hash"] = prompt_hashes[idx]
+                    parsed["response_hash"] = f"sha256:{hashlib.sha256(raw.encode('utf-8')).hexdigest()}"
                     parsed["raw_response"] = raw[:500]
                     reviews[idx] = parsed
                 except Exception as e:
                     reviews[idx] = {
                         "model_name": model, "provider": provider,
+                        "model_id": model, "prompt_hash": prompt_hashes.get(idx, ""),
+                        "response_hash": "",
                         "error": str(e), "summary": "", "intent": "",
                         "concerns": [], "risk_assessment": "error",
                         "confidence": 0.0, "rubric_scores": {},
@@ -745,8 +753,8 @@ Respond with JSON only:
         avg_conf = sum(r.get("confidence", 0) for r in valid) / len(valid)
         return avg_conf >= 0.85
 
-    def _call_provider(self, provider: str, model: str, prompt: str) -> str:
-        """Dispatch a prompt to the appropriate provider and return raw text."""
+    def _call_provider(self, provider: str, model: str, prompt: str) -> tuple[str, dict]:
+        """Dispatch a prompt to the appropriate provider and return (text, metadata)."""
         if provider == "ollama":
             return self._call_ollama(prompt, model)
         elif provider == "openrouter":
@@ -791,23 +799,18 @@ Respond with JSON only:
     ) -> dict:
         """Get a single model's review of the diff."""
         prompt = self._build_review_prompt(diff_content, sensitive_zones, rubric, use_rubric)
+        prompt_hash = f"sha256:{hashlib.sha256(prompt.encode('utf-8')).hexdigest()}"
 
         try:
-            if provider == "ollama":
-                response = self._call_ollama(prompt, model)
-            elif provider == "openrouter":
-                response = self._call_openrouter(prompt, model)
-            elif provider == "anthropic":
-                response = self._call_anthropic(prompt, model)
-            elif provider == "openai":
-                response = self._call_openai(prompt, model)
-            else:
-                return {"error": f"Unknown provider: {provider}"}
+            response, meta = self._call_provider(provider, model, prompt)
 
             # Parse response
             parsed = self._parse_review_response(response)
             parsed["model_name"] = model
             parsed["provider"] = provider
+            parsed["model_id"] = meta.get("model_id", model)
+            parsed["prompt_hash"] = prompt_hash
+            parsed["response_hash"] = f"sha256:{hashlib.sha256(response.encode('utf-8')).hexdigest()}"
             parsed["raw_response"] = response[:500]  # Truncate for storage
             return parsed
 
@@ -815,6 +818,9 @@ Respond with JSON only:
             return {
                 "model_name": model,
                 "provider": provider,
+                "model_id": model,
+                "prompt_hash": prompt_hash,
+                "response_hash": "",
                 "error": str(e),
                 "summary": "",
                 "intent": "",
@@ -1023,8 +1029,8 @@ IMPORTANT: If the code follows security best practices, respond with "approve" a
         import hashlib
         return f"sha256:{hashlib.sha256(diff_content.encode()).hexdigest()}"
 
-    def _call_ollama(self, prompt: str, model: str) -> str:
-        """Call Ollama local model and return response."""
+    def _call_ollama(self, prompt: str, model: str) -> tuple[str, dict]:
+        """Call Ollama local model and return (text, metadata)."""
         import openai
 
         base_url = self.ollama_host.rstrip('/')
@@ -1041,10 +1047,10 @@ IMPORTANT: If the code follows security best practices, respond with "approve" a
             messages=[{"role": "user", "content": prompt}],
             max_tokens=1000
         )
-        return response.choices[0].message.content
+        return response.choices[0].message.content, {"model_id": response.model or model}
 
-    def _call_openrouter(self, prompt: str, model: str) -> str:
-        """Call OpenRouter API and return response."""
+    def _call_openrouter(self, prompt: str, model: str) -> tuple[str, dict]:
+        """Call OpenRouter API and return (text, metadata)."""
         import openai
 
         client = openai.OpenAI(
@@ -1061,10 +1067,10 @@ IMPORTANT: If the code follows security best practices, respond with "approve" a
                 "X-Title": "GuardSpine CodeGuard"
             }
         )
-        return response.choices[0].message.content
+        return response.choices[0].message.content, {"model_id": response.model or model}
 
-    def _call_anthropic(self, prompt: str, model: str) -> str:
-        """Call Anthropic API and return response."""
+    def _call_anthropic(self, prompt: str, model: str) -> tuple[str, dict]:
+        """Call Anthropic API and return (text, metadata)."""
         import anthropic
 
         client = anthropic.Anthropic(api_key=self.anthropic_key)
@@ -1074,10 +1080,10 @@ IMPORTANT: If the code follows security best practices, respond with "approve" a
             max_tokens=1000,
             messages=[{"role": "user", "content": prompt}]
         )
-        return response.content[0].text
+        return response.content[0].text, {"model_id": response.model or model}
 
-    def _call_openai(self, prompt: str, model: str) -> str:
-        """Call OpenAI API and return response."""
+    def _call_openai(self, prompt: str, model: str) -> tuple[str, dict]:
+        """Call OpenAI API and return (text, metadata)."""
         import openai
 
         client = openai.OpenAI(api_key=self.openai_key)
@@ -1087,7 +1093,7 @@ IMPORTANT: If the code follows security best practices, respond with "approve" a
             messages=[{"role": "user", "content": prompt}],
             max_tokens=1000
         )
-        return response.choices[0].message.content
+        return response.choices[0].message.content, {"model_id": response.model or model}
 
     def _generate_ai_summary(self, diff_content: str, sensitive_zones: list) -> dict:
         """Generate AI-powered summary of changes."""

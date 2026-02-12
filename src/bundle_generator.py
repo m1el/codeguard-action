@@ -121,6 +121,20 @@ class BundleGenerator:
         pii_shield = analysis.get("pii_shield", {"enabled": False})
         sanitization = analysis.get("sanitization")
 
+        # Extract per-model provenance for sealing into the hash chain.
+        mmr = analysis.get("multi_model_review") or {}
+        reviews_sealed = [
+            {
+                "model_name": r.get("model_name", ""),
+                "provider": r.get("provider", ""),
+                "model_id": r.get("model_id", r.get("model_name", "")),
+                "prompt_hash": r.get("prompt_hash", ""),
+                "response_hash": r.get("response_hash", ""),
+            }
+            for r in (mmr.get("reviews") or [])
+            if not r.get("error")
+        ]
+
         # Event 2: Analysis Completed
         analysis_event = BundleEvent(
             event_type="analysis_completed",
@@ -136,6 +150,7 @@ class BundleGenerator:
                 "analysis_diff_hash": analysis_diff_hash,
                 "pii_shield": pii_shield,
                 "sanitization": sanitization,
+                "reviews_sealed": reviews_sealed,
             }
         )
         previous_hash = analysis_event.compute_hash(previous_hash)
