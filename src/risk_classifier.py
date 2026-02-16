@@ -202,6 +202,9 @@ class RiskClassifier:
         if rubric in self.builtin_rubrics:
             return self.builtin_rubrics[rubric]
 
+        if re.search(r'[:/\\\n\r\0]|\.\.', rubric):
+            return None
+
         candidates: list[Path] = []
         raw = Path(rubric)
         if raw.is_absolute():
